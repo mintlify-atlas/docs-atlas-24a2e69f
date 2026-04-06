@@ -1,0 +1,106 @@
+{
+  "projectType": "sdk-library",
+  "projectName": "ShadowHook",
+  "projectDescription": "An Android inline hook library supporting Thumb, ARM32, and ARM64 instruction sets for production apps.",
+  "theme": "aspen",
+  "primaryColor": "#848c8e",
+  "lightColor": "#11161e",
+  "darkColor": "#cfd0d2",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart"
+            ]
+          },
+          {
+            "group": "Concepts",
+            "pages": [
+              "concepts/hook-modes",
+              "concepts/hook-vs-intercept",
+              "concepts/symbols"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/hook-unhook",
+              "guides/intercept-unintercept",
+              "guides/proxy-functions",
+              "guides/linker-callbacks",
+              "guides/operation-records"
+            ]
+          },
+          {
+            "group": "Reference",
+            "pages": [
+              "reference/api",
+              "reference/error-codes"
+            ]
+          },
+          {
+            "group": "Help",
+            "pages": [
+              "help/known-issues",
+              "help/faq"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Inline hook for entire functions (hook) and mid-function instruction intercept",
+    "Supports armeabi-v7a and arm64-v8a on Android 4.1–16 (API 16–36)",
+    "Three hook modes: shared (recursive-safe chaining), multi (chaining without recursion guard), and unique (exclusive hook)",
+    "Auto-hooks newly loaded ELFs via library name + function name with pending task support",
+    "Symbol lookup bypassing linker namespace restrictions (.dynsym, .symtab, .gnu_debugdata)",
+    "Linker lifecycle callbacks before/after .init/.init_array and .fini/.fini_array",
+    "CFI and FP unwind compatibility in proxy and interceptor functions",
+    "Operation recording with exportable hook/intercept audit log"
+  ],
+  "publicApiSurface": [
+    "shadowhook_init(shadowhook_mode_t default_mode, bool debuggable)",
+    "shadowhook_hook_func_addr(void *func_addr, void *new_addr, void **orig_addr)",
+    "shadowhook_hook_sym_addr(void *sym_addr, void *new_addr, void **orig_addr)",
+    "shadowhook_hook_sym_name(const char *lib_name, const char *sym_name, void *new_addr, void **orig_addr)",
+    "shadowhook_hook_sym_name_callback(lib_name, sym_name, new_addr, orig_addr, hooked, hooked_arg)",
+    "shadowhook_hook_func_addr_2(func_addr, new_addr, orig_addr, uint32_t flags, ...)",
+    "shadowhook_hook_sym_addr_2(sym_addr, new_addr, orig_addr, uint32_t flags, ...)",
+    "shadowhook_hook_sym_name_2(lib_name, sym_name, new_addr, orig_addr, uint32_t flags)",
+    "shadowhook_hook_sym_name_callback_2(lib_name, sym_name, new_addr, orig_addr, flags, hooked, hooked_arg)",
+    "shadowhook_unhook(void *stub)",
+    "shadowhook_intercept_instr_addr(void *instr_addr, shadowhook_interceptor_t pre, void *data, uint32_t flags, ...)",
+    "shadowhook_intercept_func_addr(void *func_addr, shadowhook_interceptor_t pre, void *data, uint32_t flags, ...)",
+    "shadowhook_intercept_sym_addr(void *sym_addr, shadowhook_interceptor_t pre, void *data, uint32_t flags, ...)",
+    "shadowhook_intercept_sym_name(lib_name, sym_name, pre, data, uint32_t flags)",
+    "shadowhook_intercept_sym_name_callback(lib_name, sym_name, pre, data, flags, intercepted, intercepted_arg)",
+    "shadowhook_unintercept(void *stub)",
+    "shadowhook_dlopen(const char *lib_name)",
+    "shadowhook_dlclose(void *handle)",
+    "shadowhook_dlsym(void *handle, const char *sym_name)",
+    "shadowhook_dlsym_dynsym(void *handle, const char *sym_name)",
+    "shadowhook_dlsym_symtab(void *handle, const char *sym_name)",
+    "shadowhook_register_dl_init_callback(pre, post, data)",
+    "shadowhook_unregister_dl_init_callback(pre, post, data)",
+    "shadowhook_register_dl_fini_callback(pre, post, data)",
+    "shadowhook_unregister_dl_fini_callback(pre, post, data)",
+    "shadowhook_get_records(uint32_t item_flags)",
+    "shadowhook_dump_records(int fd, uint32_t item_flags)",
+    "shadowhook_get_errno(void)",
+    "shadowhook_to_errmsg(int error_number)",
+    "ShadowHook.init() [Java]",
+    "ShadowHook.init(Config config) [Java]",
+    "SHADOWHOOK_CALL_PREV macro",
+    "SHADOWHOOK_POP_STACK macro",
+    "SHADOWHOOK_STACK_SCOPE macro",
+    "SHADOWHOOK_ALLOW_REENTRANT macro",
+    "SHADOWHOOK_DISALLOW_REENTRANT macro",
+    "SHADOWHOOK_RETURN_ADDRESS macro"
+  ]
+}

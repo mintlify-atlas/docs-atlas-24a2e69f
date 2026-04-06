@@ -1,0 +1,186 @@
+---
+title: "Symbol Lookup"
+description: "How ShadowHook searches for function addresses across .dynsym, .symtab, and .gnu_debugdata ELF sections."
+---
+
+Using symbol names to locate hook targets is a common approach with good compatibility benefits. ShadowHook integrates the [xDL](https://github.com/hexhacking/xDL) library to bypass Android linker namespace restrictions and query symbol addresses across all ELFs in the process.
+
+---
+
+## ELF sections containing symbol information
+
+Symbol information may exist in up to three sections of an ELF file:
+
+<AccordionGroup>
+  <Accordion title=".dynsym — dynamic linking symbols">
+    Stores symbols that participate in the dynamic linking process. The linker reads `.dynsym` during the relocate phase when loading ELFs.
+
+    Symbols in `.dynsym` are divided into two categories:
+    - **Import symbols**: symbols in external ELFs that the current ELF calls (e.g., if `libmy.so` uses `memcpy` from `libc.so`, then `memcpy` is an import symbol of `libmy.so`).
+    - **Export symbols**: symbols in the current ELF that can be called externally or internally (e.g., `memcpy` is an export symbol of `libc.so`). Export symbols can be inline hooked.
+
+    `.dynsym` is the **fastest** section to search because the linker maps it into memory when loading the ELF.
+  </Accordion>
+  <Accordion title=".symtab — full symbol table">
+    A mixed collection that includes Local symbols, which do not participate in dynamic linking. Local symbols are used by debuggers and crash/ANR backtrace tools.
+
+    `.dynsym` is **not** a subset of `.symtab` — they do not have an inclusion relationship, as verified across many production devices.
+
+    Searching `.symtab` requires **reading the file** (the linker does not map `.symtab` into memory when loading an ELF), making it **slower** than searching `.dynsym`.
+  </Accordion>
+  <Accordion title=".gnu_debugdata — compressed .symtab">
+    Because `.symtab` can be large, some ELFs compress it with LZMA and store the result in `.gnu_debugdata`. ShadowHook decompresses this section on demand to access the embedded `.symtab`.
+
+    Searching `.gnu_debugdata` requires both a file read and LZMA decompression, making it the **slowest** option.
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Key notes about symbol names
+
+<AccordionGroup>
+  <Accordion title="C++ name mangling">
+    C++ function symbol names are **mangled** — they encode parameter type information. C function symbol names are just the function name itself.
+
+    For example, `art::ArtMethod::Invoke(...)` appears in the ELF as `_ZN3art9ArtMethod6InvokeEPNS_6ThreadEPjjPNS_6JValueEPKc`.
+
+    Pass the mangled name to ShadowHook APIs.
+  </Accordion>
+  <Accordion title="32-bit vs 64-bit differences">
+    The same C++ function may have **different symbol names** in 32-bit and 64-bit ELFs because `size_t` is 4 bytes in 32-bit and 8 bytes in 64-bit, and parameter types are part of the mangled name. Define symbol names separately for each ABI when hooking.
+  </Accordion>
+  <Accordion title="AOSP version differences">
+    The same C++ system function may have **different parameter types** (and therefore different symbol names) across AOSP versions. Define symbol names separately for each AOSP version when hooking.
+  </Accordion>
+  <Accordion title="LLVM random hash suffixes">
+    LLVM may append one or more random hash suffixes to Local symbols in `.symtab` during operations like LTO. These suffixes start with `.` or `$`.
+
+    For example, `libart.so` may contain:
+    ```
+    _ZN3artL12IsStringInitERKNS_11InstructionEPNS_9ArtMethodE.__uniq.113072803961313432437294106468273961305
+    ```
+
+    The actual C++ symbol is `_ZN3artL12IsStringInitERKNS_11InstructionEPNS_9ArtMethodE`. Pass only the base symbol — ShadowHook automatically ignores LLVM-appended hash suffixes when searching.
+  </Accordion>
+  <Accordion title="Special ELF prefixes">
+    Some ELFs prefix all their symbols. For example, the Android linker adds `__dl_` to every symbol. The function `__loader_cfi_fail` in the linker source appears in the ELF as `__dl___loader_cfi_fail`.
+
+    Pass the full symbol name as it appears in the ELF (including any prefix).
+  </Accordion>
+  <Accordion title="Tool display suffixes (@@)">
+    Tools like `readelf` may display symbol names with `@@` suffixes (e.g., `memcpy@@LIBC`). The actual symbol name is the part before `@@`. Pass `memcpy`, not `memcpy@@LIBC`.
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Viewing symbol information with LLVM NDK tools
+
+<Warning>
+When analyzing Android ELFs, always use **LLVM binutils from the Android NDK**. Binutils from Linux or macOS systems may have compatibility issues with Android ELF formats.
+</Warning>
+
+**View export symbols in `.dynsym` and `.symtab`:**
+
+```shell
+llvm-readelf -sW ./libXXX.so | grep -v " UND "
+```
+
+**Check whether `.gnu_debugdata` exists:**
+
+```shell
+llvm-readelf -S ./libXXX.so | grep ".gnu_debugdata"
+```
+
+**Extract and decompress `.gnu_debugdata` to inspect its embedded `.symtab`:**
+
+```shell
+llvm-objcopy --dump-section .gnu_debugdata=libXXX_gnu_debugdata.so.xz ./libXXX.so
+xz -d -k libXXX_gnu_debugdata.so.xz
+llvm-readelf -sW ./libXXX_gnu_debugdata.so | grep -v " UND "
+```
+
+---
+
+## ShadowHook dlsym APIs
+
+ShadowHook provides five symbol-lookup APIs modelled after the standard `dlopen` / `dlclose` / `dlsym` interface:
+
+```c
+#include "shadowhook.h"
+
+void *shadowhook_dlopen(const char *lib_name);
+void  shadowhook_dlclose(void *handle);
+void *shadowhook_dlsym(void *handle, const char *sym_name);
+void *shadowhook_dlsym_dynsym(void *handle, const char *sym_name);
+void *shadowhook_dlsym_symtab(void *handle, const char *sym_name);
+```
+
+| API | Searches | Speed |
+|-----|----------|-------|
+| `shadowhook_dlsym` | `.dynsym` first, then `.symtab` and `.symtab` inside `.gnu_debugdata` | Depends on where the symbol is found |
+| `shadowhook_dlsym_dynsym` | `.dynsym` only | Fastest |
+| `shadowhook_dlsym_symtab` | `.symtab` and `.symtab` inside `.gnu_debugdata` | Slower (requires file read, possibly decompression) |
+
+- Use `shadowhook_dlsym_dynsym()` when you know the symbol is an export symbol in `.dynsym` and that this holds across all target devices.
+- Use `shadowhook_dlsym_symtab()` when you know the symbol exists only in `.symtab` or `.gnu_debugdata`.
+- Use `shadowhook_dlsym()` when you are unsure — it provides the best compatibility by trying all three sections.
+
+### Example
+
+```c
+void *handle = shadowhook_dlopen("libart.so");
+void *sym_addr = shadowhook_dlsym(handle, "_ZN3art9ArtMethod6InvokeEPNS_6ThreadEPjjPNS_6JValueEPKc");
+shadowhook_dlclose(handle);
+
+if (sym_addr == NULL) {
+    LOG("symbol not found");
+    return;
+}
+
+void *stub = shadowhook_hook_sym_addr_2(
+    sym_addr, my_proxy, &orig,
+    SHADOWHOOK_HOOK_WITH_MULTI_MODE | SHADOWHOOK_HOOK_RECORD,
+    "libart.so", "ArtMethod::Invoke"
+);
+```
+
+---
+
+## Performance tip: batch symbol lookup
+
+<Tip>
+When hooking multiple symbols in the same ELF, call `shadowhook_dlopen()` once, then call `shadowhook_dlsym()` for each symbol, then call `shadowhook_dlclose()` once — rather than calling `shadowhook_hook_sym_name()` separately for each symbol.
+
+`shadowhook_hook_sym_name()` and `shadowhook_hook_sym_name_2()` internally perform a full `dlopen → dlsym → dlclose` cycle for every call. Repeatedly opening and closing the same ELF increases time consumption. If the symbol lives in `.symtab` or `.gnu_debugdata`, each call also re-reads the file and re-decompresses the data — work that is discarded with each `dlclose`.
+
+The recommended pattern:
+
+```c
+void *handle = shadowhook_dlopen("libart.so");
+
+void *sym1 = shadowhook_dlsym(handle, "symbol_one");
+void *sym2 = shadowhook_dlsym(handle, "symbol_two");
+void *sym3 = shadowhook_dlsym(handle, "symbol_three");
+
+shadowhook_dlclose(handle);
+
+// Now hook each address
+shadowhook_hook_sym_addr_2(sym1, proxy1, &orig1, SHADOWHOOK_HOOK_WITH_MULTI_MODE | SHADOWHOOK_HOOK_RECORD, "libart.so", "symbol_one");
+shadowhook_hook_sym_addr_2(sym2, proxy2, &orig2, SHADOWHOOK_HOOK_WITH_MULTI_MODE | SHADOWHOOK_HOOK_RECORD, "libart.so", "symbol_two");
+shadowhook_hook_sym_addr_2(sym3, proxy3, &orig3, SHADOWHOOK_HOOK_WITH_MULTI_MODE | SHADOWHOOK_HOOK_RECORD, "libart.so", "symbol_three");
+```
+
+Using `SHADOWHOOK_HOOK_RECORD` with `shadowhook_hook_sym_addr_2()` also preserves complete target information (library name and symbol name) in the operation records, which the address-only approach would otherwise leave unknown.
+</Tip>
+
+---
+
+## How `shadowhook_hook_sym_name` resolves addresses
+
+The `shadowhook_*_sym_name*()` family of APIs is a convenience wrapper: internally each call performs `shadowhook_dlopen → shadowhook_dlsym → shadowhook_dlclose → shadowhook_*_sym_addr`. They also handle the case where the target ELF has not yet been loaded:
+
+- If the ELF is not in memory when the call is made, ShadowHook records the task internally and returns a non-`NULL` stub with `errno == 1` (pending).
+- When the linker later loads the ELF, ShadowHook completes the recorded hook or intercept task before the linker calls the ELF's `.init` and `.init_array`.
+- If you used `shadowhook_*_sym_name_callback*()`, ShadowHook invokes your callback after executing the deferred task.

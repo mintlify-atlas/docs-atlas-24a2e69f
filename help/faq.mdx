@@ -1,0 +1,153 @@
+---
+title: "FAQ"
+description: "Frequently asked questions about ShadowHook."
+---
+
+<AccordionGroup>
+  <Accordion title="Can I initialize ShadowHook multiple times?">
+    Yes. In a single process, only the first initialization takes effect. Subsequent calls to `shadowhook_init()` or `ShadowHook.init()` simply return the result of the first call without doing anything else.
+
+    This means multiple SDKs bundled into the same app can each call `init()` independently without conflicts, as long as their initialization parameters are consistent (particularly the default hook mode).
+
+    ```c
+    // SDK A
+    shadowhook_init(SHADOWHOOK_MODE_SHARED, false);
+
+    // SDK B — this call is a no-op; returns the result from SDK A's call
+    shadowhook_init(SHADOWHOOK_MODE_SHARED, false);
+    ```
+  </Accordion>
+
+  <Accordion title="What's the difference between hook and PLT hook?">
+    ShadowHook performs **inline hook**: it modifies instructions at the function's entry point (or at a mid-function instruction for intercept). This affects every caller of the function, including calls from within the same ELF.
+
+    [ByteHook](https://github.com/bytedance/bhook) performs **PLT hook**: it redirects the GOT entry for a symbol in a specific ELF. This only affects calls that go through that ELF's PLT; calls within the same ELF that were resolved at compile time are not affected.
+
+    Use ShadowHook when you need to:
+    - Hook calls that originate from within the same ELF as the target function.
+    - Intercept instructions at an arbitrary mid-function address.
+    - Hook functions that do not have PLT entries.
+  </Accordion>
+
+  <Accordion title="Why must I call SHADOWHOOK_POP_STACK or SHADOWHOOK_STACK_SCOPE in shared mode?">
+    In shared mode, the hub's enter trampoline uses a **tail call** to invoke the proxy function. This is required to preserve the original `LR` value so that CFI-based stack unwinding works correctly inside the proxy.
+
+    Because the call is a tail call, there is no opportunity for the enter trampoline to automatically clean up the "proxy call state" after the proxy returns. If you omit `SHADOWHOOK_POP_STACK` or `SHADOWHOOK_STACK_SCOPE`, the hub sees that the proxy call state is still active on the next invocation and concludes that a recursive call is in progress. It then bypasses all proxies and calls the real function directly.
+
+    The result: your proxy function executes only once, and every subsequent call to the hooked function skips the proxy entirely.
+
+    ```c
+    void *my_proxy(size_t sz) {
+        // Must call this — even if you don't call the original function
+        SHADOWHOOK_POP_STACK();
+
+        void *result = SHADOWHOOK_CALL_PREV(my_proxy, malloc_t, sz);
+        return result;
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Why can't I set orig_addr to NULL after unhooking in multi mode?">
+    Thread safety. When you call `shadowhook_unhook()`, another thread may currently be executing inside your proxy function. After ShadowHook updates the proxy chain, that other thread may still need to dereference `orig_addr` to retrieve the address of the next function in the chain.
+
+    If you set `orig_addr` to NULL, that other thread will dereference a null pointer and crash.
+
+    Additionally, ShadowHook itself may write a new value into `orig_addr` at any time (for example, when another proxy is added or removed from the chain). Do not modify `orig_addr` after hooking, and do not set it to NULL after unhooking.
+
+    ```c
+    void *orig; // global variable — must remain readable/writable at all times
+
+    void do_unhook(void) {
+        shadowhook_unhook(stub);
+        stub = NULL;
+        // Do NOT: orig = NULL;
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Can I disable ShadowHook at runtime?">
+    Yes. There are two scenarios:
+
+    **Before initialization** — call `ShadowHook.setDisable(true)` (Java) or `shadowhook_set_disable(true)` (native) before any initialization call. Subsequent initialization will fail with errno 45 (`SHADOWHOOK_ERRNO_DISABLED`), and all hook and intercept API calls will also fail.
+
+    ```java
+    ShadowHook.setDisable(true);
+    // Any subsequent ShadowHook.init() will fail
+    ```
+
+    Alternatively, pass `disable=true` during initialization:
+
+    ```java
+    ShadowHook.init(new ShadowHook.ConfigBuilder().setDisable(true).build());
+    ```
+
+    **After a successful initialization** — calling `setDisable(true)` will cause all subsequent hook and intercept calls to fail, but existing hooks and intercepts that have already been installed will continue to run normally. There is no way to undo already-installed hooks via the disable flag.
+
+    A typical use case for the disable feature is cloud-controlled A/B testing to determine whether hooks are responsible for a difficult crash.
+  </Accordion>
+
+  <Accordion title="What Android versions and architectures are supported?">
+    - **Android versions:** 4.1 through 16 (API level 16 through 36).
+    - **ABIs:** `armeabi-v7a` and `arm64-v8a`.
+
+    x86, x86_64, and Houdini (ARM-on-x86 emulation) environments are **not** supported. In a Houdini environment, the linker is an x86 ELF, and ShadowHook's linker hook fails during initialization.
+  </Accordion>
+
+  <Accordion title="What does errno 1 (PENDING) mean?">
+    It means the target ELF specified via `lib_name` + `sym_name` has not been loaded into memory yet. ShadowHook has recorded the hook or intercept task internally. When the linker loads the ELF, ShadowHook will automatically execute the task before calling `.init_array`.
+
+    **This is not an error.** The returned stub is valid and can be passed to `shadowhook_unhook()` to cancel the pending task.
+
+    To receive a notification when the hook actually executes, use the `_callback` variants:
+
+    ```c
+    void my_hooked_callback(int error_number, const char *lib_name,
+                            const char *sym_name, void *sym_addr,
+                            void *new_addr, void *orig_addr, void *arg) {
+        // Called when the pending hook completes (or fails)
+        if (error_number == 0) {
+            // hook succeeded
+        }
+    }
+
+    stub = shadowhook_hook_sym_name_callback(
+        "libfoo.so", "bar", my_proxy, &orig,
+        my_hooked_callback, NULL
+    );
+    int err = shadowhook_get_errno();
+    // err == 1 means pending — not an error
+    ```
+  </Accordion>
+
+  <Accordion title="How do I get debug logs?">
+    Pass `debuggable=true` to `shadowhook_init()`, or call `shadowhook_set_debuggable(true)` at any time after initialization:
+
+    ```c
+    shadowhook_init(SHADOWHOOK_MODE_SHARED, true);
+
+    // or after init:
+    shadowhook_set_debuggable(true);
+    ```
+
+    ```java
+    ShadowHook.init(new ShadowHook.ConfigBuilder().setDebuggable(true).build());
+
+    // or after init:
+    ShadowHook.setDebuggable(true);
+    ```
+
+    Debug output appears in logcat under the tag `shadowhook_tag`.
+
+    <Warning>
+      Debug logging has a significant performance impact. Always disable it in production/release builds.
+    </Warning>
+  </Accordion>
+
+  <Accordion title="Can multiple SDKs use ShadowHook in the same app?">
+    Yes. The recommended approach is for all SDKs to use **shared mode** (the default). In shared mode, multiple proxy functions can coexist at the same hook address and are called in order. ShadowHook automatically prevents recursive circular calls between proxies in shared mode.
+
+    Shared mode and multi mode proxy functions can also coexist at the same address. **Unique mode** prevents coexistence: if a unique-mode hook exists at an address, no other hook of any mode can be added to that address, and vice versa.
+
+    Since only the first `shadowhook_init()` call takes effect, SDKs should agree on a consistent default mode. If they use different modes for the same hook address, mode-conflict errors (errno 43, `SHADOWHOOK_ERRNO_MODE_CONFLICT`) may occur.
+  </Accordion>
+</AccordionGroup>

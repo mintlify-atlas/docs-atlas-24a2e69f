@@ -1,0 +1,119 @@
+---
+title: "Known Issues"
+description: "Platform limitations and known edge cases to be aware of before deploying ShadowHook to production."
+---
+
+## Stability issues
+
+<AccordionGroup>
+  <Accordion title="Signal handler ordering with native crash SDKs">
+    ShadowHook uses [bytesig](https://github.com/bytedance/bytesig) to protect certain high-risk operations during hook and intercept with a native crash fallback: it registers `SIGSEGV` and `SIGBUS` handlers that call `siglongjmp()` if a crash occurs.
+
+    If ShadowHook is initialized **before** your native crash capture SDK registers its own signal handlers, the crash SDK's handlers will be registered later and will therefore run first (signal handlers are LIFO). Crashes that ShadowHook would have recovered from are instead caught by the crash SDK and reported as real app crashes.
+
+    **Mitigation:** Initialize ShadowHook **after** your native crash capture SDK.
+  </Accordion>
+
+  <Accordion title="Island trampoline memory reuse (v2.0.0+)">
+    Starting from version 2.0.0, ShadowHook writes island trampolines into the memory regions of certain symbols that are no longer used at runtime. If any other mechanism (e.g., another hooking library) also writes into those same regions, crashes will occur.
+
+    The affected symbols are listed below. Refer to `sh_elf.c` in the source for the authoritative list.
+
+    | ELF | Symbol (demangled) | Symbol name | API level | arm64-v8a | armeabi-v7a |
+    |-----|--------------------|-------------|-----------|-----------|-------------|
+    | `linker/linker64` | `__linker_init` | `__dl___linker_init` | [21, 36] | ✓ | ✓ |
+    | `linker/linker64` | `__linker_init_post_relocation` | `__dl__ZL29__linker_init_post_relocationR19KernelArgumentBlockj` | [21, 26] | | ✓ |
+    | `linker/linker64` | `__linker_init_post_relocation` | `__dl__ZL29__linker_init_post_relocationR19KernelArgumentBlocky` | [21, 26] | ✓ | |
+    | `linker/linker64` | `__linker_init_post_relocation` | `__dl__ZL29__linker_init_post_relocationR19KernelArgumentBlock` | [27, 28] | ✓ | ✓ |
+    | `linker/linker64` | `__linker_init_post_relocation` | `__dl__ZL29__linker_init_post_relocationR19KernelArgumentBlockR6soinfo` | [29, 36] | ✓ | ✓ |
+    | `libart.so` | `art::Runtime::Start` | `_ZN3art7Runtime5StartEv` | [21, 36] | ✓ | ✓ |
+    | `libart.so` | `art::Runtime::Init` | `_ZN3art7Runtime4InitERKNSt3__16vectorINS1_4pairINS1_12basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEEPKvEENS7_ISC_EEEEb` | [21, 23] | ✓ | ✓ |
+    | `libart.so` | `art::Runtime::Init` | `_ZN3art7Runtime4InitEONS_18RuntimeArgumentMapE` | [24, 36] | ✓ | ✓ |
+    | `libandroid_runtime.so` | `android::AndroidRuntime::start` | `_ZN7android14AndroidRuntime5startEPKcRKNS_6VectorINS_7String8EEE` | [21, 22] | ✓ | ✓ |
+    | `libandroid_runtime.so` | `android::AndroidRuntime::start` | `_ZN7android14AndroidRuntime5startEPKcRKNS_6VectorINS_7String8EEEb` | [23, 36] | ✓ | ✓ |
+    | `libandroid_runtime.so` | `android::AndroidRuntime::startVm` | `_ZN7android14AndroidRuntime7startVmEPP7_JavaVMPP7_JNIEnv` | [21, 22] | ✓ | ✓ |
+    | `libandroid_runtime.so` | `android::AndroidRuntime::startVm` | `_ZN7android14AndroidRuntime7startVmEPP7_JavaVMPP7_JNIEnvb` | [23, 29] | ✓ | ✓ |
+    | `libandroid_runtime.so` | `android::AndroidRuntime::startVm` | `_ZN7android14AndroidRuntime7startVmEPP7_JavaVMPP7_JNIEnvbb` | [30, 36] | ✓ | ✓ |
+  </Accordion>
+
+  <Accordion title="32-bit multi-core race condition">
+    <Warning>
+      This issue only affects 32-bit (armeabi-v7a) apps. 64-bit apps are not affected.
+    </Warning>
+
+    In 32-bit environments, hooking or intercepting frequently called functions such as `malloc()`, `free()`, or `pthread_mutex_lock()` has a non-zero crash probability.
+
+    The root cause is that Thumb instructions execute in 2-byte units, but ShadowHook must cover at least 4 bytes at the target address when installing a hook. Although the 4-byte write is itself atomic on a single core, on multi-core CPUs it is possible for another core to execute the first 2 bytes of the old instructions before the write completes, and then continue executing the last 2 bytes of the new 4-byte jump instruction. This produces an invalid instruction sequence and crashes.
+
+    There is no complete mitigation. Avoid hooking extremely hot 32-bit functions if the crash probability is unacceptable for your use case.
+  </Accordion>
+
+  <Accordion title="32-bit unavoidable crashes from backward jumps">
+    <Warning>
+      This issue only affects 32-bit (armeabi-v7a) apps and certain functions with specific control-flow patterns.
+    </Warning>
+
+    In 32-bit environments, some functions contain backward jump instructions that land inside the region covered by ShadowHook's patch bytes. These cases will always crash after hooking.
+
+    For example, in `pthread_rwlock_wrlock` in 32-bit `libc.so`, ShadowHook covers the 4 bytes at offsets `[0x0008216E, 0x00082172)` — the `LDR R2, [R0]` and `CMP R2, #3` instructions — with a 4-byte relative jump. However, the `BEQ` at offset `0x00082194` jumps back to `0x00082170`, which lands in the middle of the covered region. After this branch, the CPU executes the second 2 bytes of the jump instruction as a Thumb instruction, which is undefined behavior and will crash.
+
+    There is no mitigation. Avoid hooking 32-bit functions that have backward jumps into their entry region.
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Availability issues
+
+<AccordionGroup>
+  <Accordion title="Island memory exhaustion">
+    Starting from version 2.0.0, ShadowHook implements hooks using a single relative-address jump at the target, plus a secondary jump stored in a nearby memory island (within ±128 MB on arm64). The total available island memory per ELF is finite.
+
+    **Typical capacity:**
+    - arm64, 4 KB pagesize: at least 256 simultaneous hooks or intercepts per ELF on average.
+    - arm64, 16 KB pagesize: at least 1024 simultaneous hooks or intercepts per ELF on average.
+
+    ShadowHook gives `libart.so`, `libandroid_runtime.so`, and `linker/linker64` special treatment to increase their island capacity, but the exact amount depends on the device and Android version. In the worst case, a specific ELF on a specific device may have no available island memory at all, causing all hook and intercept attempts on that ELF to fail with errno 40, 41, or 42.
+
+    **Recommendations:**
+    - Call `shadowhook_unhook()` and `shadowhook_unintercept()` promptly when a hook or intercept is no longer needed.
+    - Always check return values and errno. Your code must continue to function correctly even when hook or intercept fails.
+    - Do not add hooks or intercepts without limit.
+  </Accordion>
+
+  <Accordion title="x86/x86_64 and Houdini not supported">
+    <Warning>
+      ShadowHook does not support x86 or x86_64 instruction sets.
+    </Warning>
+
+    ShadowHook supports only `armeabi-v7a` and `arm64-v8a`.
+
+    **Houdini environments** (x86 devices running ARM code via the Houdini ARM-translation layer) are also not supported. In a Houdini environment, system libraries including `linker`, `libart.so`, and `libhoudini.so` are all x86 ELFs. Starting from version 1.1.1, ShadowHook hooks the linker during initialization. Since the linker is an x86 ELF in a Houdini environment, this inline hook fails, causing ShadowHook initialization to fail with errno 35.
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Intercept issues
+
+<AccordionGroup>
+  <Accordion title="Data interleaved in instruction sequences cannot be intercepted">
+    ShadowHook does not distinguish between instruction bytes and data bytes embedded in an instruction sequence. If you pass an address that points to inline data rather than an instruction, ShadowHook will treat it as an instruction and the behavior is undefined.
+
+    Do not pass data addresses to any intercept API.
+  </Accordion>
+
+  <Accordion title="32-bit: two consecutive Thumb instructions cannot both be intercepted simultaneously">
+    In 32-bit environments, when two consecutive Thumb instructions are located at adjacent addresses — either two 2-byte instructions, or a 2-byte instruction immediately followed by a 4-byte instruction — ShadowHook cannot intercept both of them at the same time. Intercepting either one individually works correctly.
+
+    The underlying reason is that ShadowHook replaces the instruction at the target address with a 4-byte relative jump. When the two instructions are adjacent, doing so for both would produce overlapping patches.
+
+    This limitation exists because the proportion of 32-bit ARM devices has significantly decreased, making the required special-case logic not cost-effective to implement at this time.
+  </Accordion>
+
+  <Accordion title="32-bit: IT instruction THEN block cannot be intercepted">
+    In 32-bit environments, instructions inside the `THEN` block of a Thumb `IT` (If-Then) instruction cannot be intercepted.
+
+    The same reasoning applies as above: supporting this case would require significant special-case handling that is not currently implemented.
+  </Accordion>
+</AccordionGroup>

@@ -1,0 +1,336 @@
+---
+title: "Intercept and Unintercept"
+description: "Use instruction-level intercept to read and modify CPU registers at any point in a function."
+---
+
+Intercept acts on individual instruction addresses — either the first instruction of a function or any instruction in the middle of it. When the intercepted instruction executes, shadowhook calls your interceptor function with a snapshot of all CPU registers. You can read and modify those registers before the original instruction resumes.
+
+<Note>
+  Intercept is independent of hook modes. Regardless of which mode is active,
+  multiple interceptors registered at the same address all execute sequentially.
+  This is different from hooks, where shared/multi/unique mode controls chaining
+  behavior.
+</Note>
+
+## Interceptor function type
+
+```c
+typedef void (*shadowhook_interceptor_t)(shadowhook_cpu_context_t *cpu_context, void *data);
+```
+
+`cpu_context` contains all general-purpose and (optionally) SIMD registers for the current architecture. `data` is the opaque pointer you provide at registration time.
+
+### CPU context structure
+
+<Tabs>
+  <Tab title="arm64">
+    ```c
+    typedef struct {
+      uint64_t regs[31];         // x0–x30
+      uint64_t sp;
+      uint64_t pc;
+      uint64_t pstate;
+      shadowhook_vreg_t vregs[32]; // q0–q31
+      uint64_t fpsr;
+      uint64_t fpcr;
+    } shadowhook_cpu_context_t;
+    ```
+
+    All registers except `sp` and `pc` can be modified. Writes to `sp` or `pc` have no effect.
+  </Tab>
+  <Tab title="arm32">
+    ```c
+    typedef struct {
+      uint32_t regs[16];         // r0–r15
+      uint32_t cpsr;
+      uint32_t fpscr;
+      // NEON / VFPv4 / VFPv3-D32: q0–q15 (d0–d31)
+      // VFPv3-D16: q0–q7 (d0–d15)
+      shadowhook_vreg_t vregs[16];
+    } shadowhook_cpu_context_t;
+    ```
+
+    All registers except `sp` (r13) and `pc` (r15) can be modified.
+  </Tab>
+</Tabs>
+
+## Flags
+
+The `flags` parameter controls which register groups are saved and restored around the interceptor call. Because reading and writing SIMD/FP registers is relatively expensive, only request what you need.
+
+| Flag | Value | Behavior |
+|------|-------|----------|
+| `SHADOWHOOK_INTERCEPT_DEFAULT` | `0` | General-purpose registers only. SIMD values in `vregs` are undefined; writes are ignored. |
+| `SHADOWHOOK_INTERCEPT_WITH_FPSIMD_READ_ONLY` | `1` | Also saves SIMD registers so you can read them. Writes are ignored. |
+| `SHADOWHOOK_INTERCEPT_WITH_FPSIMD_WRITE_ONLY` | `2` | Also restores SIMD registers from `vregs` so you can write them. Reads return undefined values. |
+| `SHADOWHOOK_INTERCEPT_WITH_FPSIMD_READ_WRITE` | `3` | Saves and restores SIMD registers; both reads and writes are effective. |
+| `SHADOWHOOK_INTERCEPT_RECORD` | `4` | When included, the two variadic parameters after `flags` (`char *record_lib_name, char *record_sym_name`) name the target ELF and symbol for operation records. |
+
+Multiple flags can be combined with `|`, for example `SHADOWHOOK_INTERCEPT_WITH_FPSIMD_READ_WRITE | SHADOWHOOK_INTERCEPT_RECORD`.
+
+## Intercept APIs
+
+### `shadowhook_intercept_instr_addr` — intercept any instruction
+
+Use this when you want to intercept an instruction that is not the first instruction of a function.
+
+```c
+void *shadowhook_intercept_instr_addr(
+    void *instr_addr,
+    shadowhook_interceptor_t pre,
+    void *data,
+    uint32_t flags,
+    ... /* char *record_lib_name, char *record_sym_name */);
+```
+
+<Warning>
+  On arm32, if the target instruction is a Thumb instruction, the address value
+  **must be odd**. Addresses obtained via `shadowhook_dlsym()`, `dlsym()`, or
+  linker relocation are already odd. When calculating addresses manually (e.g.,
+  adding an offset), you must set the lowest bit: `(func_addr + offset) | 0x1`.
+</Warning>
+
+**Return value:** non-`NULL` stub on success; `NULL` on failure — call `shadowhook_get_errno()` then `shadowhook_to_errmsg()` for details.
+
+<Tabs>
+  <Tab title="arm32">
+    ```c
+    void *stub;
+
+    void my_interceptor_arm(shadowhook_cpu_context_t *cpu_context, void *data) {
+        if (cpu_context->regs[5] == 0) { // When r5 equals 0, modify r6 and r7
+            cpu_context->regs[6] = 1;
+            cpu_context->regs[7] = 10;
+            LOG("arm: found r5 == 0, data = %p", data);
+        }
+    }
+
+    void do_intercept(void) {
+        // Target is offset +8 in read(); it's a thumb instruction — address must be odd
+        void *instr_addr = (void *)((uintptr_t)(read + 8) | 0x1);
+        stub = shadowhook_intercept_instr_addr(
+            instr_addr, my_interceptor_arm, (void *)0x123,
+            SHADOWHOOK_INTERCEPT_RECORD, "libc.so", "read+8");
+        if (stub == NULL) {
+            int error_num = shadowhook_get_errno();
+            const char *error_msg = shadowhook_to_errmsg(error_num);
+            LOG("intercept failed: %p, %d - %s", stub, error_num, error_msg);
+        }
+    }
+    ```
+  </Tab>
+  <Tab title="arm64">
+    ```c
+    void *stub;
+
+    void my_interceptor_arm64(shadowhook_cpu_context_t *cpu_context, void *data) {
+        if (cpu_context->regs[19] == 0) { // When x19 equals 0, modify x20 and x21
+            cpu_context->regs[20] = 1;
+            cpu_context->regs[21] = 1000;
+            LOG("arm64: found x19 == 0, data = %p", data);
+        }
+    }
+
+    void do_intercept(void) {
+        // arm64 instructions are fixed 4 bytes; offset 20 = after the 5th instruction
+        void *instr_addr = (void *)((uintptr_t)read + 20);
+        stub = shadowhook_intercept_instr_addr(
+            instr_addr, my_interceptor_arm64, (void *)0x123,
+            SHADOWHOOK_INTERCEPT_RECORD, "libc.so", "read+20");
+        if (stub == NULL) {
+            int error_num = shadowhook_get_errno();
+            const char *error_msg = shadowhook_to_errmsg(error_num);
+            LOG("intercept failed: %p, %d - %s", stub, error_num, error_msg);
+        }
+    }
+    ```
+  </Tab>
+</Tabs>
+
+### `shadowhook_intercept_func_addr` — intercept first instruction of a function
+
+Use this when you have a function address but it is not in the ELF's symbol table.
+
+```c
+void *shadowhook_intercept_func_addr(
+    void *func_addr,
+    shadowhook_interceptor_t pre,
+    void *data,
+    uint32_t flags,
+    ... /* char *record_lib_name, char *record_sym_name */);
+```
+
+```c
+void *stub;
+
+void my_interceptor_arm64(shadowhook_cpu_context_t *cpu_context, void *data) {
+    if (cpu_context->regs[19] == 0) {
+        cpu_context->regs[20] = 1;
+        cpu_context->regs[21] = 1000;
+        LOG("arm64: found x19 == 0, data = %p", data);
+    }
+}
+
+void do_intercept(void) {
+    void *func_addr = get_hidden_func_addr();
+    stub = shadowhook_intercept_func_addr(
+        func_addr, my_interceptor_arm64, (void *)0x123,
+        SHADOWHOOK_INTERCEPT_RECORD, "libmy.so", "my_hidden_func");
+    if (stub == NULL) {
+        int error_num = shadowhook_get_errno();
+        const char *error_msg = shadowhook_to_errmsg(error_num);
+        LOG("intercept failed: %p, %d - %s", stub, error_num, error_msg);
+    }
+}
+```
+
+### `shadowhook_intercept_sym_addr` — intercept via symbol address
+
+The address must be present in the ELF's `.dynsym` or `.symtab`. Use `shadowhook_dlopen()` / `shadowhook_dlsym()` to look it up first.
+
+```c
+void *shadowhook_intercept_sym_addr(
+    void *sym_addr,
+    shadowhook_interceptor_t pre,
+    void *data,
+    uint32_t flags,
+    ... /* char *record_lib_name, char *record_sym_name */);
+```
+
+```c
+void *stub;
+
+void my_interceptor_arm64(shadowhook_cpu_context_t *cpu_context, void *data) {
+    if (cpu_context->regs[19] == 0) {
+        cpu_context->regs[20] = 1;
+        cpu_context->regs[21] = 1000;
+        LOG("arm64: found x19 == 0, data = %p", data);
+    }
+}
+
+void do_intercept(void) {
+    void *handle = shadowhook_dlopen("libart.so");
+    void *sym_addr = shadowhook_dlsym(handle, "_ZN3art9ArtMethod6InvokeEPNS_6ThreadEPjjPNS_6JValueEPKc");
+    shadowhook_dlclose(handle);
+    if (sym_addr == NULL) {
+        LOG("symbol not found");
+        return;
+    }
+
+    stub = shadowhook_intercept_sym_addr(
+        sym_addr, my_interceptor_arm64, (void *)0x123,
+        SHADOWHOOK_INTERCEPT_RECORD, "libart.so", "ArtMethod::Invoke");
+    if (stub == NULL) {
+        int error_num = shadowhook_get_errno();
+        const char *error_msg = shadowhook_to_errmsg(error_num);
+        LOG("intercept failed: %p, %d - %s", stub, error_num, error_msg);
+    }
+}
+```
+
+### `shadowhook_intercept_sym_name` / `shadowhook_intercept_sym_name_callback` — intercept via library and symbol name
+
+shadowhook looks up the symbol internally. If the target ELF has not been loaded yet, the operation is recorded as a pending task (errno 1) and executed automatically once the ELF loads.
+
+```c
+// callback type (for the _callback variant)
+typedef void (*shadowhook_intercepted_t)(
+    int error_number, const char *lib_name, const char *sym_name,
+    void *sym_addr, shadowhook_interceptor_t pre, void *data, void *arg);
+
+void *shadowhook_intercept_sym_name(
+    const char *lib_name, const char *sym_name,
+    shadowhook_interceptor_t pre, void *data, uint32_t flags);
+
+void *shadowhook_intercept_sym_name_callback(
+    const char *lib_name, const char *sym_name,
+    shadowhook_interceptor_t pre, void *data, uint32_t flags,
+    shadowhook_intercepted_t intercepted, void *intercepted_arg);
+```
+
+**Return value:**
+- Non-`NULL`, errno == 0 — intercept succeeded immediately.
+- Non-`NULL`, errno == 1 — intercept is pending; save the stub for later `shadowhook_unintercept()`.
+- `NULL` — intercept failed.
+
+<CodeGroup>
+```c shadowhook_intercept_sym_name
+void *stub;
+
+void my_interceptor_arm64(shadowhook_cpu_context_t *cpu_context, void *data) {
+    if (cpu_context->regs[19] == 0) {
+        cpu_context->regs[20] = 1;
+        cpu_context->regs[21] = 1000;
+        LOG("arm64: found x19 == 0, data = %p", data);
+    }
+}
+
+void do_intercept(void) {
+    stub = shadowhook_intercept_sym_name(
+        "libart.so",
+        "_ZN3art9ArtMethod6InvokeEPNS_6ThreadEPjjPNS_6JValueEPKc",
+        my_interceptor_arm64, (void *)0x123, SHADOWHOOK_INTERCEPT_DEFAULT);
+    int error_num = shadowhook_get_errno();
+    if (stub == NULL) {
+        const char *error_msg = shadowhook_to_errmsg(error_num);
+        LOG("intercept failed: %p, %d - %s", stub, error_num, error_msg);
+    } else if (error_num == 1) {
+        LOG("intercept pending");
+    }
+}
+```
+```c shadowhook_intercept_sym_name_callback
+void *stub;
+
+void my_intercepted_callback(int error_number, const char *lib_name,
+    const char *sym_name, void *sym_addr,
+    shadowhook_interceptor_t pre, void *data, void *arg) {
+    const char *error_msg = shadowhook_to_errmsg(error_number);
+    LOG("intercept finished: %s, %s, %d - %s", lib_name, sym_name, error_number, error_msg);
+}
+
+void my_interceptor_arm64(shadowhook_cpu_context_t *cpu_context, void *data) {
+    if (cpu_context->regs[19] == 0) {
+        cpu_context->regs[20] = 1;
+        cpu_context->regs[21] = 1000;
+        LOG("arm64: found x19 == 0, data = %p", data);
+    }
+}
+
+void do_intercept(void) {
+    stub = shadowhook_intercept_sym_name_callback(
+        "libart.so",
+        "_ZN3art9ArtMethod6InvokeEPNS_6ThreadEPjjPNS_6JValueEPKc",
+        my_interceptor_arm64, (void *)0x123, SHADOWHOOK_INTERCEPT_DEFAULT,
+        my_intercepted_callback, NULL);
+    int error_num = shadowhook_get_errno();
+    if (stub == NULL) {
+        const char *error_msg = shadowhook_to_errmsg(error_num);
+        LOG("intercept failed: %p, %d - %s", stub, error_num, error_msg);
+    } else if (error_num == 1) {
+        LOG("intercept pending");
+    }
+}
+```
+</CodeGroup>
+
+## Unintercept
+
+```c
+int shadowhook_unintercept(void *stub);
+```
+
+Pass the stub returned by any intercept API. Returns `0` on success, `-1` on failure.
+
+```c
+void *stub;
+
+void do_unintercept(void) {
+    int result = shadowhook_unintercept(stub);
+    if (result != 0) {
+        int error_num = shadowhook_get_errno();
+        const char *error_msg = shadowhook_to_errmsg(error_num);
+        LOG("unintercept failed: %d - %s", error_num, error_msg);
+    }
+}
+```

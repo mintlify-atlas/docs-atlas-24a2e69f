@@ -1,0 +1,122 @@
+---
+title: "Linker Lifecycle Callbacks"
+description: "Register callbacks that fire before and after an ELF's .init_array or .fini_array executes."
+---
+
+When the Android linker loads an ELF it calls `soinfo::call_constructors()`, which runs the functions in the ELF's `.init` and `.init_array` sections. When unloading, it calls `soinfo::call_destructors()`, which runs `.fini` and `.fini_array`. These two moments are critical integration points — for example, you can apply PLT hooks, JNI hooks, or direct instruction modifications to an ELF **before** its own constructors run.
+
+shadowhook exposes a set of APIs to register callbacks that fire immediately before and after these sections execute.
+
+<Note>
+  This feature requires Android 5.0 (API level 21) or higher. Calling the
+  registration APIs on Android 4.x returns errno 38 (`Register callback not
+  supported`).
+</Note>
+
+## Callback type
+
+```c
+typedef void (*shadowhook_dl_info_t)(struct dl_phdr_info *info, size_t size, void *data);
+```
+
+The parameters mirror those of `dl_iterate_phdr()`. `info->dlpi_name` contains the ELF pathname and `info->dlpi_addr` is its load bias.
+
+## Registration APIs
+
+```c
+#include "shadowhook.h"
+
+// .init + .init_array callbacks
+int shadowhook_register_dl_init_callback(
+    shadowhook_dl_info_t pre,
+    shadowhook_dl_info_t post,
+    void *data);
+
+int shadowhook_unregister_dl_init_callback(
+    shadowhook_dl_info_t pre,
+    shadowhook_dl_info_t post,
+    void *data);
+
+// .fini + .fini_array callbacks
+int shadowhook_register_dl_fini_callback(
+    shadowhook_dl_info_t pre,
+    shadowhook_dl_info_t post,
+    void *data);
+
+int shadowhook_unregister_dl_fini_callback(
+    shadowhook_dl_info_t pre,
+    shadowhook_dl_info_t post,
+    void *data);
+```
+
+### Parameters
+
+| Parameter | Nullable | Description |
+|-----------|----------|-------------|
+| `pre` | Yes | Called **before** `.init` / `.init_array` (or `.fini` / `.fini_array`) runs. |
+| `post` | Yes | Called **after** `.init` / `.init_array` (or `.fini` / `.fini_array`) runs. |
+| `data` | Yes | Passed as the last argument to both `pre` and `post`. |
+
+`pre` and `post` cannot both be `NULL` in the same call.
+
+### Return value
+
+- `0` — success.
+- `-1` — failure; call `shadowhook_get_errno()` then `shadowhook_to_errmsg()` for details.
+
+Common failure reasons:
+
+| errno | Meaning |
+|-------|---------|
+| 36 | Duplicate registration: a callback with the same `pre`, `post`, and `data` is already registered. |
+| 37 | Unregister failed: no matching registration found. |
+| 38 | Feature not supported on this Android version (requires 5.0+). |
+
+## Use cases
+
+- **PLT hooks before `.init_array`** — hook functions in a newly loaded library before any of its constructors run, ensuring all calls from those constructors go through your proxy.
+- **JNI hooks** — intercept `JNI_OnLoad` or other JNI registration calls by hooking before the library's `.init_array` runs.
+- **Instruction modification** — patch specific instructions in the newly mapped ELF before execution begins, using the `pre` callback to obtain the load bias from `info->dlpi_addr`.
+
+## Example
+
+```c
+#include "shadowhook.h"
+
+static void dl_init_pre(struct dl_phdr_info *info, size_t size, void *data) {
+    (void)size, (void)data;
+    LOG("dl_init_pre. load_bias %" PRIxPTR ", %s",
+        (uintptr_t)info->dlpi_addr, info->dlpi_name);
+}
+
+static void dl_fini_post(struct dl_phdr_info *info, size_t size, void *data) {
+    (void)size, (void)data;
+    LOG("dl_fini_post. load_bias %" PRIxPTR ", %s",
+        (uintptr_t)info->dlpi_addr, info->dlpi_name);
+}
+
+void register_callback(void) {
+    if (0 != shadowhook_register_dl_init_callback(dl_init_pre, NULL, NULL)) {
+        int error_num = shadowhook_get_errno();
+        const char *error_msg = shadowhook_to_errmsg(error_num);
+        LOG("register dl_init callback failed: %d - %s", error_num, error_msg);
+    }
+
+    if (0 != shadowhook_register_dl_fini_callback(NULL, dl_fini_post, NULL)) {
+        int error_num = shadowhook_get_errno();
+        const char *error_msg = shadowhook_to_errmsg(error_num);
+        LOG("register dl_fini callback failed: %d - %s", error_num, error_msg);
+    }
+}
+```
+
+In the example above, `dl_init_pre` fires before every ELF's `.init_array` runs, and `dl_fini_post` fires after every ELF's `.fini_array` runs. Each receives `info` with the ELF's load bias and pathname.
+
+## Unregistering
+
+Pass the same `pre`, `post`, and `data` values you used during registration. All three must match for the unregister to succeed.
+
+```c
+shadowhook_unregister_dl_init_callback(dl_init_pre, NULL, NULL);
+shadowhook_unregister_dl_fini_callback(NULL, dl_fini_post, NULL);
+```

@@ -1,0 +1,346 @@
+---
+title: "Hook and Unhook"
+description: "How to hook functions and unhook them using ShadowHook's native C API."
+---
+
+ShadowHook supports hooking entire functions and unhooking them at any time. You specify the hook target in one of three ways: by raw function address, by the address of a function that has a symbol, or by library name plus function name.
+
+## Hook flags
+
+The `_2` variants of every hook API accept a `uint32_t flags` parameter. Combine flags with `|`.
+
+| Flag | Value | Meaning |
+|---|---|---|
+| `SHADOWHOOK_HOOK_DEFAULT` | `0` | Use the default mode set during `shadowhook_init()` |
+| `SHADOWHOOK_HOOK_WITH_SHARED_MODE` | `1` | Force shared mode for this hook |
+| `SHADOWHOOK_HOOK_WITH_UNIQUE_MODE` | `2` | Force unique mode for this hook |
+| `SHADOWHOOK_HOOK_WITH_MULTI_MODE` | `4` | Force multi mode for this hook |
+| `SHADOWHOOK_HOOK_RECORD` | `8` | Enable operation recording; pass `char *record_lib_name, char *record_sym_name` after `flags` |
+
+---
+
+## Via function address
+
+Use these APIs when the target function is **not** in any ELF symbol table — for example, an address returned by a runtime calculation.
+
+```c
+void *shadowhook_hook_func_addr(void *func_addr, void *new_addr, void **orig_addr);
+
+void *shadowhook_hook_func_addr_2(void *func_addr, void *new_addr, void **orig_addr,
+                                   uint32_t flags,
+                                   ... /* char *record_lib_name, char *record_sym_name */);
+```
+
+### Parameters
+
+<ParamField path="func_addr" type="void *" required>
+  Absolute address of the function to hook. Does not need to exist in the ELF symbol table.
+</ParamField>
+
+<ParamField path="new_addr" type="void *" required>
+  Absolute address of the proxy function that replaces the original.
+</ParamField>
+
+<ParamField path="orig_addr" type="void **">
+  Pointer that receives the original function address after the hook. Required in multi mode; may be `NULL` in shared and unique modes.
+</ParamField>
+
+<ParamField path="flags" type="uint32_t" required>
+  Combination of `SHADOWHOOK_HOOK_*` flags. When `SHADOWHOOK_HOOK_RECORD` is set, two additional `char *` arguments follow: the target ELF name and target symbol name used only for operation records.
+</ParamField>
+
+### Return value
+
+- **Non-`NULL`** — Hook succeeded. Save the stub to pass to `shadowhook_unhook()` later.
+- **`NULL`** — Hook failed. Call `shadowhook_get_errno()` then `shadowhook_to_errmsg()` for details.
+
+### Examples
+
+<CodeGroup>
+
+```c Default mode
+void *orig;
+void *stub;
+
+void do_hook() {
+    void *func_addr = get_hidden_func_addr();
+    stub = shadowhook_hook_func_addr(func_addr, my_proxy, &orig);
+    if (stub == NULL) {
+        int error_num = shadowhook_get_errno();
+        const char *error_msg = shadowhook_to_errmsg(error_num);
+        LOG("hook failed: %d - %s", error_num, error_msg);
+    }
+}
+```
+
+```c Multi mode with record
+void *orig;
+void *stub;
+
+void do_hook() {
+    void *func_addr = get_hidden_func_addr();
+    stub = shadowhook_hook_func_addr_2(func_addr, my_proxy, &orig,
+               SHADOWHOOK_HOOK_WITH_MULTI_MODE | SHADOWHOOK_HOOK_RECORD,
+               "libmy.so", "my_hidden_func");
+    if (stub == NULL) {
+        int error_num = shadowhook_get_errno();
+        const char *error_msg = shadowhook_to_errmsg(error_num);
+        LOG("hook failed: %d - %s", error_num, error_msg);
+    }
+}
+```
+
+</CodeGroup>
+
+---
+
+## Via address of function with symbol
+
+Use these APIs when the target function **exists in the ELF's `.dynsym` or `.symtab`**. You can confirm this with `llvm-readelf -sW`.
+
+```c
+void *shadowhook_hook_sym_addr(void *sym_addr, void *new_addr, void **orig_addr);
+
+void *shadowhook_hook_sym_addr_2(void *sym_addr, void *new_addr, void **orig_addr,
+                                  uint32_t flags,
+                                  ... /* char *record_lib_name, char *record_sym_name */);
+```
+
+### Parameters
+
+<ParamField path="sym_addr" type="void *" required>
+  Absolute address of the function to hook. Must exist in the ELF's `.dynsym` or `.symtab`. Use `shadowhook_dlopen` / `shadowhook_dlsym` to obtain it.
+</ParamField>
+
+<ParamField path="new_addr" type="void *" required>
+  Absolute address of the proxy function.
+</ParamField>
+
+<ParamField path="orig_addr" type="void **">
+  Pointer that receives the original function address. Required in multi mode; may be `NULL` in shared and unique modes.
+</ParamField>
+
+<ParamField path="flags" type="uint32_t" required>
+  Combination of `SHADOWHOOK_HOOK_*` flags. When `SHADOWHOOK_HOOK_RECORD` is set, two additional `char *` arguments follow: the target ELF name and target symbol name.
+</ParamField>
+
+### Return value
+
+- **Non-`NULL`** — Hook succeeded. Save the stub for later unhook.
+- **`NULL`** — Hook failed. Call `shadowhook_get_errno()` then `shadowhook_to_errmsg()` for details.
+
+### Examples
+
+<CodeGroup>
+
+```c Hook malloc directly
+void *orig;
+void *stub;
+
+void do_hook() {
+    stub = shadowhook_hook_sym_addr(malloc, my_proxy, &orig);
+    if (stub == NULL) {
+        int error_num = shadowhook_get_errno();
+        const char *error_msg = shadowhook_to_errmsg(error_num);
+        LOG("hook failed: %d - %s", error_num, error_msg);
+    }
+}
+```
+
+```c Hook ArtMethod::Invoke with record
+void *orig;
+void *stub;
+
+void do_hook() {
+    void *handle = shadowhook_dlopen("libart.so");
+    void *sym_addr = shadowhook_dlsym(handle,
+        "_ZN3art9ArtMethod6InvokeEPNS_6ThreadEPjjPNS_6JValueEPKc");
+    shadowhook_dlclose(handle);
+    if (sym_addr == NULL) {
+        LOG("symbol not found");
+        return;
+    }
+
+    stub = shadowhook_hook_sym_addr_2(sym_addr, my_proxy, &orig,
+               SHADOWHOOK_HOOK_WITH_MULTI_MODE | SHADOWHOOK_HOOK_RECORD,
+               "libart.so", "ArtMethod::Invoke");
+    if (stub == NULL) {
+        int error_num = shadowhook_get_errno();
+        const char *error_msg = shadowhook_to_errmsg(error_num);
+        LOG("hook failed: %d - %s", error_num, error_msg);
+    }
+}
+```
+
+</CodeGroup>
+
+<Tip>
+**Best practice when hooking multiple symbols in the same ELF**
+
+If the target ELF is already loaded (e.g., `libart.so`), batch the address lookups first, then hook each one individually:
+
+1. Call `shadowhook_dlopen()` once.
+2. Call `shadowhook_dlsym()` for every symbol you need.
+3. Call `shadowhook_dlclose()`.
+4. Call `shadowhook_hook_sym_addr_2()` for each address, passing `SHADOWHOOK_HOOK_RECORD` and the ELF and symbol names.
+
+This is faster than calling `shadowhook_hook_sym_name()` for each symbol, because `hook_sym_name` internally reopens and re-reads the ELF for every call. Symbols in `.symtab` require a file read; symbols in `.symtab in .gnu_debugdata` also require LZMA decompression — both of which are released when `shadowhook_dlclose()` is called.
+</Tip>
+
+---
+
+## Via library name + function name
+
+Use these APIs to hook by **ELF basename (or full path) plus symbol name**. ShadowHook automatically handles the case where the ELF hasn't been loaded into memory yet.
+
+```c
+// callback type fired after the hook executes
+typedef void (*shadowhook_hooked_t)(int error_number,
+                                    const char *lib_name,
+                                    const char *sym_name,
+                                    void *sym_addr,
+                                    void *new_addr,
+                                    void *orig_addr,
+                                    void *arg);
+
+// Default mode
+void *shadowhook_hook_sym_name(const char *lib_name, const char *sym_name,
+                               void *new_addr, void **orig_addr);
+
+void *shadowhook_hook_sym_name_callback(const char *lib_name, const char *sym_name,
+                                        void *new_addr, void **orig_addr,
+                                        shadowhook_hooked_t hooked, void *hooked_arg);
+
+// Explicit mode
+void *shadowhook_hook_sym_name_2(const char *lib_name, const char *sym_name,
+                                  void *new_addr, void **orig_addr, uint32_t flags);
+
+void *shadowhook_hook_sym_name_callback_2(const char *lib_name, const char *sym_name,
+                                           void *new_addr, void **orig_addr,
+                                           uint32_t flags,
+                                           shadowhook_hooked_t hooked, void *hooked_arg);
+```
+
+### Parameters
+
+<ParamField path="lib_name" type="const char *" required>
+  Basename or full pathname of the ELF. For ELFs with unique basenames in the process you can pass just the basename (e.g., `"libart.so"`). When multiple ELFs share the same basename (e.g., `/system/lib64/libbinderthreadstate.so` and `/system/lib64/vndk-sp-29/libbinderthreadstate.so`), pass the full path or handle each match explicitly; ShadowHook will only hook the first ELF matching the basename.
+</ParamField>
+
+<ParamField path="sym_name" type="const char *" required>
+  Symbol name. For C++ functions, use the mangled name.
+</ParamField>
+
+<ParamField path="new_addr" type="void *" required>
+  Absolute address of the proxy function.
+</ParamField>
+
+<ParamField path="orig_addr" type="void **">
+  Pointer that receives the original function address. Required in multi mode; may be `NULL` in shared and unique modes.
+</ParamField>
+
+<ParamField path="flags" type="uint32_t" required>
+  Hook mode flag (`SHADOWHOOK_HOOK_WITH_SHARED_MODE`, `SHADOWHOOK_HOOK_WITH_UNIQUE_MODE`, or `SHADOWHOOK_HOOK_WITH_MULTI_MODE`).
+</ParamField>
+
+<ParamField path="hooked" type="shadowhook_hooked_t">
+  Optional callback invoked after the hook completes (whether immediately or after the ELF loads). The first parameter is the errno: `0` = success, non-`0` = failure. May be `NULL`.
+</ParamField>
+
+<ParamField path="hooked_arg" type="void *">
+  Passed as the last `arg` parameter of the `hooked` callback. May be `NULL`.
+</ParamField>
+
+### Return value
+
+| Result | errno | Meaning |
+|---|---|---|
+| Non-`NULL` | `0` | Hook succeeded immediately |
+| Non-`NULL` | `1` | Pending — ELF not yet loaded; ShadowHook will complete the hook when the ELF loads |
+| `NULL` | any | Hook failed; call `shadowhook_get_errno()` for details |
+
+### Examples
+
+<CodeGroup>
+
+```c Explicit mode, check for pending
+void *orig;
+void *stub;
+
+void do_hook() {
+    stub = shadowhook_hook_sym_name_2(
+        "libart.so",
+        "_ZN3art9ArtMethod6InvokeEPNS_6ThreadEPjjPNS_6JValueEPKc",
+        my_proxy, &orig, SHADOWHOOK_HOOK_WITH_MULTI_MODE);
+    int error_num = shadowhook_get_errno();
+    if (stub == NULL) {
+        const char *error_msg = shadowhook_to_errmsg(error_num);
+        LOG("hook failed: %p, %d - %s", stub, error_num, error_msg);
+    } else if (error_num == 1) {
+        LOG("hook pending");
+    }
+}
+```
+
+```c With completion callback
+void *orig;
+void *stub;
+
+typedef void my_hooked_callback(int error_number, const char *lib_name,
+    const char *sym_name, void *sym_addr, void *new_addr,
+    void *orig_addr, void *arg) {
+    const char *error_msg = shadowhook_to_errmsg(error_number);
+    LOG("hook finished: %s, %s, %d - %s", lib_name, sym_name,
+        error_number, error_msg);
+}
+
+void do_hook(void) {
+    stub = shadowhook_hook_sym_name_callback(
+        "libart.so",
+        "_ZN3art9ArtMethod6InvokeEPNS_6ThreadEPjjPNS_6JValueEPKc",
+        my_proxy, &orig, my_hooked_callback, NULL);
+    int error_num = shadowhook_get_errno();
+    if (stub == NULL) {
+        const char *error_msg = shadowhook_to_errmsg(error_num);
+        LOG("hook failed: %p, %d - %s", stub, error_num, error_msg);
+    } else if (error_num == 1) {
+        LOG("hook pending");
+    }
+}
+```
+
+</CodeGroup>
+
+---
+
+## Unhook
+
+```c
+int shadowhook_unhook(void *stub);
+```
+
+### Parameters
+
+<ParamField path="stub" type="void *" required>
+  The stub value returned by a previous hook call.
+</ParamField>
+
+### Return value
+
+- **`0`** — Unhook succeeded.
+- **`-1`** — Unhook failed. Call `shadowhook_get_errno()` then `shadowhook_to_errmsg()` for details.
+
+### Example
+
+```c
+void *stub;
+
+void do_unhook() {
+    int result = shadowhook_unhook(stub);
+    if (result != 0) {
+        int error_num = shadowhook_get_errno();
+        const char *error_msg = shadowhook_to_errmsg(error_num);
+        LOG("unhook failed: %d - %s", error_num, error_msg);
+    }
+}
+```

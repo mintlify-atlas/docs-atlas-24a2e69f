@@ -1,0 +1,282 @@
+---
+title: "Hook vs Intercept"
+description: "Learn the difference between hook (function replacement) and intercept (instruction-level breakpointing) in ShadowHook."
+---
+
+ShadowHook supports two operation types: **hook** and **intercept**. They differ in where they act, what the caller provides, and how execution flows through them.
+
+<Tabs>
+  <Tab title="Hook">
+    - Acts on **entire functions** (the first instruction of a function).
+    - The caller provides a **proxy function** with the same type as the original (same parameter types and return type).
+    - When the hooked function executes, the proxy function runs first.
+    - The proxy function may call or skip the original function.
+    - The same function can be hooked multiple times.
+    - Returns a stub for later unhook.
+  </Tab>
+  <Tab title="Intercept">
+    - Acts on **any instruction address** — the first address of a function or any instruction in the middle of a function.
+    - The caller provides an **interceptor function** that receives a `shadowhook_cpu_context_t *`.
+    - The interceptor can **read and modify register values** (except `SP` and `PC`).
+    - When the interceptor returns, the intercepted instruction executes normally.
+    - Unrelated to hook modes — multiple interceptors can be added to the same address and all will run.
+    - Returns a stub for later unintercept.
+  </Tab>
+</Tabs>
+
+---
+
+## Call flow
+
+### When a function is hooked only
+
+```
+caller
+  └─► enter (trampoline)
+        └─► proxy function N        ← outermost proxy runs first
+              └─► proxy function N-1
+                    └─► ...
+                          └─► proxy function 1
+                                └─► real original function (trampoline)
+                                      └─► returns up the chain
+```
+
+Each proxy function in the chain can choose to call `orig_addr` / `SHADOWHOOK_CALL_PREV` (continuing the chain) or return early (skipping the rest of the chain and the real original function).
+
+### When a function is intercepted only (at its first instruction)
+
+```
+caller
+  └─► enter (trampoline)
+        └─► interceptor function 1
+              └─► interceptor function 2
+                    └─► ...
+                          └─► intercepted instruction executes
+                                └─► rest of original function continues
+```
+
+Every interceptor function is always called — there is no way to skip subsequent interceptors.
+
+### When both hook and intercept target the same function's first address
+
+```
+caller
+  └─► enter (trampoline)
+        └─► interceptor function 1   ← all interceptors run first
+              └─► interceptor function 2
+                    └─► ...
+                          └─► proxy function N   ← hook proxy runs after all interceptors
+                                └─► proxy function N-1
+                                      └─► ...
+                                            └─► real original function (trampoline)
+```
+
+<Info>
+When both operations target the same address: all intercept interceptors run first, then the hook proxy function chain runs. Each interceptor always executes; hook proxy functions may skip the original.
+</Info>
+
+---
+
+## CPU context structure
+
+The interceptor function receives a pointer to `shadowhook_cpu_context_t`, which contains all register values at the point of interception.
+
+<Tabs>
+  <Tab title="arm64 (aarch64)">
+```c
+typedef union {
+  __uint128_t q;
+  uint64_t    d[2];
+  uint32_t    s[4];
+  uint16_t    h[8];
+  uint8_t     b[16];
+} shadowhook_vreg_t;
+
+typedef struct {
+  uint64_t regs[31];        // x0-x30
+  uint64_t sp;
+  uint64_t pc;
+  uint64_t pstate;
+  shadowhook_vreg_t vregs[32]; // q0-q31
+  uint64_t fpsr;
+  uint64_t fpcr;
+} shadowhook_cpu_context_t;
+```
+  </Tab>
+  <Tab title="arm32">
+```c
+typedef union {
+  uint64_t d[2];
+  uint32_t s[4];
+  uint16_t h[8];
+  uint8_t  b[16];
+} shadowhook_vreg_t;
+
+typedef struct {
+  uint32_t regs[16];           // r0-r15
+  uint32_t cpsr;
+  uint32_t fpscr;
+  // (1) NEON, VFPv4, VFPv3-D32: q0-q15 (d0-d31)
+  // (2) VFPv3-D16:               q0-q7  (d0-d15)
+  shadowhook_vreg_t vregs[16];
+} shadowhook_cpu_context_t;
+```
+  </Tab>
+</Tabs>
+
+<Warning>
+Modifications to `SP` (`regs[13]` on arm32, `sp` on arm64) and `PC` (`regs[15]` on arm32, `pc` on arm64) in the interceptor function are **ignored**. All other general-purpose register modifications take effect when the interceptor returns.
+</Warning>
+
+---
+
+## FPSIMD flags
+
+Reading and writing FPSIMD registers is relatively expensive. Use the `flags` parameter to control which register classes are saved and restored around your interceptor:
+
+```c
+// Only read/write general-purpose registers (recommended when FPSIMD is not needed)
+#define SHADOWHOOK_INTERCEPT_DEFAULT                0  // 0b000
+
+// Read FPSIMD registers into cpu_context (values will be valid for reading)
+#define SHADOWHOOK_INTERCEPT_WITH_FPSIMD_READ_ONLY  1  // 0b001
+
+// Write FPSIMD registers from cpu_context back to hardware after interceptor returns
+#define SHADOWHOOK_INTERCEPT_WITH_FPSIMD_WRITE_ONLY 2  // 0b010
+
+// Both read and write FPSIMD registers
+#define SHADOWHOOK_INTERCEPT_WITH_FPSIMD_READ_WRITE 3  // 0b011
+
+// Also record the target ELF name and symbol name in operation records
+#define SHADOWHOOK_INTERCEPT_RECORD                 4  // 0b100
+```
+
+When `SHADOWHOOK_INTERCEPT_DEFAULT` is used, the `vregs`, `fpsr`, and `fpcr` fields in `shadowhook_cpu_context_t` will contain **random (undefined) values**, and any writes to them will have no effect.
+
+---
+
+## Interceptor function signature
+
+```c
+typedef void (*shadowhook_interceptor_t)(shadowhook_cpu_context_t *cpu_context, void *data);
+```
+
+- `cpu_context`: pointer to the CPU register state at the intercept point.
+- `data`: the arbitrary pointer passed to the intercept API as the `data` parameter.
+
+---
+
+## Intercept API overview
+
+```c
+// Intercept at an arbitrary instruction address (mid-function or function start)
+void *shadowhook_intercept_instr_addr(
+    void *instr_addr,
+    shadowhook_interceptor_t pre,
+    void *data,
+    uint32_t flags,
+    ... /* char *record_lib_name, char *record_sym_name */
+);
+
+// Intercept at a function's first instruction (by raw function address)
+void *shadowhook_intercept_func_addr(
+    void *func_addr,
+    shadowhook_interceptor_t pre,
+    void *data,
+    uint32_t flags,
+    ... /* char *record_lib_name, char *record_sym_name */
+);
+
+// Intercept at a function's first instruction (address must exist in .dynsym or .symtab)
+void *shadowhook_intercept_sym_addr(
+    void *sym_addr,
+    shadowhook_interceptor_t pre,
+    void *data,
+    uint32_t flags,
+    ... /* char *record_lib_name, char *record_sym_name */
+);
+
+// Intercept by library name + symbol name
+void *shadowhook_intercept_sym_name(
+    const char *lib_name,
+    const char *sym_name,
+    shadowhook_interceptor_t pre,
+    void *data,
+    uint32_t flags
+);
+
+// Intercept by library name + symbol name, with completion callback
+void *shadowhook_intercept_sym_name_callback(
+    const char *lib_name,
+    const char *sym_name,
+    shadowhook_interceptor_t pre,
+    void *data,
+    uint32_t flags,
+    shadowhook_intercepted_t intercepted,
+    void *intercepted_arg
+);
+
+// Remove a previously installed interceptor
+int shadowhook_unintercept(void *stub);
+```
+
+---
+
+## Example: intercepting a mid-function instruction
+
+Since interceptors deal with registers directly, arm32 and arm64 interceptors are typically defined separately:
+
+```c
+void *stub;
+
+#if defined(__arm__)
+void my_interceptor_arm(shadowhook_cpu_context_t *cpu_context, void *data) {
+    if (cpu_context->regs[5] == 0) { // When r5 equals 0, modify r6 and r7
+        cpu_context->regs[6] = 1;
+        cpu_context->regs[7] = 10;
+    }
+}
+
+void do_intercept(void) {
+    // Target is a thumb instruction at offset +8; ensure the address value is odd
+    void *instr_addr = (void *)((uintptr_t)(read + 8) | 0x1);
+    stub = shadowhook_intercept_instr_addr(
+        instr_addr,
+        my_interceptor_arm,
+        NULL,
+        SHADOWHOOK_INTERCEPT_RECORD,
+        "libc.so", "read+8"
+    );
+}
+#endif
+
+#if defined(__aarch64__)
+void my_interceptor_arm64(shadowhook_cpu_context_t *cpu_context, void *data) {
+    if (cpu_context->regs[19] == 0) { // When x19 equals 0, modify x20 and x21
+        cpu_context->regs[20] = 1;
+        cpu_context->regs[21] = 1000;
+    }
+}
+
+void do_intercept(void) {
+    // arm64 instructions are fixed 4 bytes; offset +20 is the 6th instruction
+    void *instr_addr = (void *)((uintptr_t)read + 20);
+    stub = shadowhook_intercept_instr_addr(
+        instr_addr,
+        my_interceptor_arm64,
+        NULL,
+        SHADOWHOOK_INTERCEPT_RECORD,
+        "libc.so", "read+20"
+    );
+    if (stub == NULL) {
+        int error_num = shadowhook_get_errno();
+        const char *error_msg = shadowhook_to_errmsg(error_num);
+        LOG("intercept failed: %d - %s", error_num, error_msg);
+    }
+}
+#endif
+```
+
+<Note>
+For thumb instructions on arm32, the address value must be **odd**. Addresses obtained through `shadowhook_dlsym()`, `dlsym()`, or linker relocate are already odd for thumb functions — no extra adjustment is needed. For mid-function instruction addresses computed manually, ensure the odd/even bit is set correctly.
+</Note>

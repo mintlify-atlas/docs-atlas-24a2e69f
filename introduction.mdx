@@ -1,0 +1,64 @@
+---
+title: "Introduction"
+description: "ShadowHook is a production-grade Android inline hook library supporting Thumb, ARM32, and ARM64."
+---
+
+ShadowHook is an Android inline hook library from ByteDance. It lets you intercept and redirect function calls at runtime — on real production devices, at scale.
+
+## Goals
+
+ShadowHook is designed around four principles:
+
+- **Stability** — Can be stably used in production apps.
+- **Compatibility** — Always maintains backward compatibility of API and ABI in new versions.
+- **Performance** — Continuously reduces API call overhead and additional runtime overhead introduced by hooks.
+- **Functionality** — Besides basic hook functionality, provides general solutions for "hook-related" issues.
+
+## Features
+
+- Supports **armeabi-v7a** and **arm64-v8a**.
+- Supports **Android 4.1–16** (API level 16–36).
+- Supports **hook** and **intercept** — two distinct operation types.
+- Supports specifying hook and intercept target locations via "address" or "library name + function name".
+- **Automatically completes hook and intercept for newly loaded ELFs**, with optional callbacks after execution.
+- **Automatically prevents recursive circular calls** between proxy functions.
+- Supports **hook and intercept operation recording**, which can be exported at any time.
+- Supports registering callbacks before and after linker calls `.init` + `.init_array` and `.fini` + `.fini_array` of newly loaded ELFs.
+- Supports **bypassing linker namespace restrictions** to query symbol addresses in `.dynsym` and `.symtab` of all ELFs in the process.
+- **Compatible with CFI unwind and FP unwind** in hook proxy functions and interceptor functions.
+- Licensed under the MIT license.
+
+## Hook vs. intercept
+
+ShadowHook supports two operation types:
+
+**Hook** applies to entire functions. You provide a proxy function with the same signature as the original. When the hooked function is called, your proxy runs first. Inside the proxy, you decide whether to call the original.
+
+**Intercept** applies to individual instruction addresses — either the first instruction of a function or any instruction in the middle. You provide an interceptor function that receives all register values. You can read and modify registers before the intercepted instruction continues executing. Intercept behaves similarly to a debugger breakpoint.
+
+When a function's first address is both hooked and intercepted, all intercept interceptor functions run first, followed by the hook proxy function.
+
+## Inline hook vs. PLT hook
+
+ShadowHook is an **inline hook** library: it patches the instructions of the target function directly in memory. This works on any function, including ones that are not exported or that are only accessible via symbol lookup.
+
+<Note>
+  If you need a **PLT hook** library for Android — which intercepts calls through the procedure linkage table rather than patching function bodies — see [ByteHook](https://github.com/bytedance/bhook).
+</Note>
+
+## Explore the docs
+
+<CardGroup cols={2}>
+  <Card title="Quick Start" icon="rocket" href="/quickstart">
+    Add ShadowHook to your project and run your first hook in minutes.
+  </Card>
+  <Card title="Hook modes" icon="code-branch" href="/concepts/hook-modes">
+    Understand shared, multi, and unique modes and choose the right strategy for your use case.
+  </Card>
+  <Card title="Hook vs. intercept" icon="arrows-split-up-and-left" href="/concepts/hook-vs-intercept">
+    Learn when to use a proxy function versus a register-level interceptor.
+  </Card>
+  <Card title="Symbols" icon="magnifying-glass" href="/concepts/symbols">
+    Bypass linker namespace restrictions to resolve symbols from `.dynsym`, `.symtab`, and `.gnu_debugdata`.
+  </Card>
+</CardGroup>

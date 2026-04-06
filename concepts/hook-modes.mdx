@@ -1,0 +1,258 @@
+---
+title: "Hook Modes"
+description: "Understand shared, multi, and unique hook modes to choose the right strategy for your use case."
+---
+
+ShadowHook provides three hook modes. Each mode is a per-proxy-function setting — you can specify an independent mode for each hook operation, or omit it to use the default mode set during initialization.
+
+<Tip>
+**Best practices**
+
+- For hook points that are **not performance-sensitive**: use shared mode (the default).
+- For **performance-sensitive** hook points: consider specifying multi mode and verify whether you see a measurable improvement.
+- For **security compliance or privacy monitoring** SDKs: consider evaluating whether unique mode is appropriate to ensure your proxy function runs without interference.
+</Tip>
+
+## Mode overview
+
+| | Shared | Multi | Unique |
+|---|---|---|---|
+| Multiple hooks at same address | Yes | Yes | No |
+| Coexist with shared/multi hooks | Yes | Yes | No |
+| Auto-prevents recursive circular calls | Yes | No | No |
+| Proxy function performance | Baseline | Better | Same as multi |
+| `orig_addr` may be `NULL` | Yes | **No** | Yes |
+
+---
+
+## Shared mode
+
+Shared mode is the default. It supports multiple simultaneous hooks at the same address and automatically prevents recursive circular calls between proxy functions. This makes it safe to use across multiple SDKs that may independently hook the same function.
+
+**Key rules for shared mode proxy functions:**
+
+- Call the original function (and subsequent proxy functions in the chain) using `SHADOWHOOK_CALL_PREV` — never via `orig_addr` or the original function name directly.
+- Always call `SHADOWHOOK_POP_STACK()` or `SHADOWHOOK_STACK_SCOPE()` for stack cleanup, even if you do not call the original function.
+- `orig_addr` always points to the **real original function** — using it directly skips all subsequent proxy functions in the chain.
+
+<Warning>
+If you omit `SHADOWHOOK_POP_STACK()` / `SHADOWHOOK_STACK_SCOPE()`, the proxy function will only execute on the first invocation. On subsequent calls, ShadowHook detects that the proxy call state is still present and skips all proxy functions, jumping directly to the real original function.
+</Warning>
+
+<Tabs>
+  <Tab title="C source file">
+```c
+void *orig;
+void *stub;
+
+typedef void *(*malloc_t)(size_t);
+
+void *malloc_proxy(size_t sz) {
+    if (sz > 1024) {
+        // Stack cleanup cannot be omitted — even when not calling the original function
+        SHADOWHOOK_POP_STACK();
+        return NULL;
+    }
+
+    // Call the original function (and any subsequent proxy functions in the chain)
+    void *result = SHADOWHOOK_CALL_PREV(malloc_proxy, malloc_t, sz);
+
+    // Execute stack cleanup (cannot be omitted)
+    SHADOWHOOK_POP_STACK();
+    return result;
+}
+
+void do_hook(void) {
+    stub = shadowhook_hook_sym_addr_2(malloc, malloc_proxy, &orig, SHADOWHOOK_HOOK_WITH_SHARED_MODE);
+}
+
+void do_unhook(void) {
+    shadowhook_unhook(stub);
+    stub = NULL;
+}
+
+void *my_malloc_4k(void) {
+    // In some scenarios, you might need to directly call the original function
+    return ((malloc_t)orig)(4096);
+}
+```
+  </Tab>
+  <Tab title="C++ source file">
+```cpp
+void *orig;
+void *stub;
+
+typedef void *(*malloc_t)(size_t);
+
+void *malloc_proxy(size_t sz) {
+    // Execute stack cleanup (cannot be omitted), only need to call once
+    SHADOWHOOK_STACK_SCOPE();
+
+    if (sz > 1024)
+        return nullptr;
+
+    // Call the original function (and any subsequent proxy functions in the chain)
+    return SHADOWHOOK_CALL_PREV(malloc_proxy, sz);
+}
+
+void do_hook(void) {
+    stub = shadowhook_hook_sym_addr_2(malloc, malloc_proxy, &orig, SHADOWHOOK_HOOK_WITH_SHARED_MODE);
+}
+
+void do_unhook(void) {
+    shadowhook_unhook(stub);
+    stub = NULL;
+}
+
+void *my_malloc_4k(void) {
+    // In some scenarios, you might need to directly call the original function
+    return ((malloc_t)orig)(4096);
+}
+```
+  </Tab>
+</Tabs>
+
+### Shared mode macros
+
+**`SHADOWHOOK_CALL_PREV`** — calls the original function (or the next proxy function in the chain):
+
+```c
+// C++ source files
+#define SHADOWHOOK_CALL_PREV(func, ...)
+
+// C source files (func_sig is the typedef of the hooked function)
+#define SHADOWHOOK_CALL_PREV(func, func_sig, ...)
+```
+
+**`SHADOWHOOK_POP_STACK`** — stack cleanup for C and C++ source files. Must be called once before the proxy function returns:
+
+```c
+#define SHADOWHOOK_POP_STACK()
+```
+
+**`SHADOWHOOK_STACK_SCOPE`** — stack cleanup for C++ source files only. Call once at the beginning of the function; cleanup runs automatically when the scope exits:
+
+```c
+#define SHADOWHOOK_STACK_SCOPE()
+```
+
+**`SHADOWHOOK_RETURN_ADDRESS`** — in shared mode, `enter` modifies `LR`, so `__builtin_return_address(0)` returns an address inside `enter`. Use this macro instead to retrieve the original `LR` value:
+
+```c
+#define SHADOWHOOK_RETURN_ADDRESS()
+```
+
+**`SHADOWHOOK_ALLOW_REENTRANT` / `SHADOWHOOK_DISALLOW_REENTRANT`** — by default, shared mode prevents proxy function reentrance. Use these macros when your proxy function contains business logic that intentionally reenters the hooked function in a bounded way:
+
+```c
+#define SHADOWHOOK_ALLOW_REENTRANT()
+#define SHADOWHOOK_DISALLOW_REENTRANT()
+```
+
+---
+
+## Multi mode
+
+Multi mode supports multiple simultaneous hooks at the same address. It does **not** automatically prevent recursive circular calls. Proxy function execution performance is better than shared mode.
+
+Shared mode and multi mode proxy functions **can coexist** at the same address.
+
+**Key rules for multi mode proxy functions:**
+
+- `orig_addr` points to the **next proxy function in the chain** (not the real original function). Only the `orig_addr` at the end of the chain points to the trampoline of the real original function.
+- `orig_addr` **cannot be `NULL`** and must always reside in readable and writable memory (a global variable, a `static` variable, or a persistent struct/class member).
+- Do not manually set `orig_addr` to `NULL` after unhook — in a multi-threaded environment, another thread may be in the middle of the proxy function and about to read `orig_addr` to locate the next proxy in the chain.
+
+<Warning>
+ShadowHook may write to `orig_addr` again after hook completion (e.g., when another proxy is unhook'd and the chain must be relinked). Never manually modify the value stored in `orig_addr`, even after calling `shadowhook_unhook()`.
+</Warning>
+
+```c
+void *orig; // global variable — must always be readable and writable
+void *stub;
+
+typedef void *(*malloc_t)(size_t);
+
+void *my_malloc(size_t sz) {
+    if (sz > 1024)
+        return nullptr;
+
+    // Call the original function (or the next proxy in the chain)
+    return ((malloc_t)orig)(sz);
+}
+
+void do_hook(void) {
+    // orig_addr cannot be NULL
+    stub = shadowhook_hook_sym_addr_2(malloc, my_malloc, &orig, SHADOWHOOK_HOOK_WITH_MULTI_MODE);
+}
+
+void do_unhook(void) {
+    shadowhook_unhook(stub);
+    stub = NULL;
+    // Do NOT set orig = NULL here
+}
+```
+
+---
+
+## Unique mode
+
+Unique mode allows only **one** hook at a given address at a time. The address must be unhook'd before another hook can be installed. Unique mode proxy functions cannot coexist with shared or multi mode proxy functions at the same address. Attempting to do so returns errno `43` (`Mode conflict`).
+
+Unique mode does **not** automatically prevent recursive circular calls, and has the same proxy function execution performance as multi mode.
+
+```c
+void *orig; // global variable
+void *stub;
+
+typedef void *(*malloc_t)(size_t);
+
+void *my_malloc(size_t sz) {
+    if (sz > 1024)
+        return nullptr;
+
+    // Call the original function via orig_addr
+    return ((malloc_t)orig)(sz);
+}
+
+void do_hook(void) {
+    stub = shadowhook_hook_sym_addr_2(malloc, my_malloc, &orig, SHADOWHOOK_HOOK_WITH_UNIQUE_MODE);
+}
+
+void do_unhook(void) {
+    shadowhook_unhook(stub);
+}
+```
+
+<Note>
+After hook completion, `orig_addr` points to the trampoline of the real original function. Calling the original function by its name directly would recurse back into the proxy function, because the inline hook has replaced the first instruction(s) of the original function with a branch to the proxy.
+</Note>
+
+---
+
+## Specifying the mode per hook call
+
+Use the `_2` suffix API variants to set the mode explicitly for a single hook operation, independently of the initialization default:
+
+```c
+#define SHADOWHOOK_HOOK_DEFAULT          0  // Use the default mode set during init
+#define SHADOWHOOK_HOOK_WITH_SHARED_MODE 1  // shared mode
+#define SHADOWHOOK_HOOK_WITH_UNIQUE_MODE 2  // unique mode
+#define SHADOWHOOK_HOOK_WITH_MULTI_MODE  4  // multi mode
+#define SHADOWHOOK_HOOK_RECORD           8  // Also record target ELF name and symbol name
+
+void *shadowhook_hook_func_addr_2(void *func_addr, void *new_addr, void **orig_addr, uint32_t flags, ...);
+void *shadowhook_hook_sym_addr_2(void *sym_addr, void *new_addr, void **orig_addr, uint32_t flags, ...);
+void *shadowhook_hook_sym_name_2(const char *lib_name, const char *sym_name, void *new_addr, void **orig_addr, uint32_t flags);
+void *shadowhook_hook_sym_name_callback_2(const char *lib_name, const char *sym_name, void *new_addr, void **orig_addr, uint32_t flags, shadowhook_hooked_t hooked, void *hooked_arg);
+```
+
+Flags can be combined with `|`. For example, to hook with multi mode and enable operation recording:
+
+```c
+stub = shadowhook_hook_sym_addr_2(
+    func_addr, my_proxy, &orig,
+    SHADOWHOOK_HOOK_WITH_MULTI_MODE | SHADOWHOOK_HOOK_RECORD,
+    "libmy.so", "my_func"
+);
+```

@@ -1,97 +1,52 @@
 ---
-title: "Introduction"
-description: "Welcome to the new home for your documentation"
+title: "ShadowHook"
+description: "An Android inline hook library supporting Thumb, ARM32, and ARM64 for production apps."
 ---
 
-## Setting up
+ShadowHook is a production-grade Android inline hook library from ByteDance. It lets you intercept and redirect function calls at runtime on armeabi-v7a and arm64-v8a devices running Android 4.1 through 16 (API 16–36).
 
-Get your documentation site up and running in minutes.
-
-<Card
-  title="Start here"
-  icon="rocket"
-  href="/quickstart"
-  horizontal
->
-  Follow our three step quickstart guide.
-</Card>
-
-## Make it yours
-
-Design a docs site that looks great and empowers your users.
-
-<Columns cols={2}>
-  <Card
-    title="Edit locally"
-    icon="pen-to-square"
-    href="/development"
-  >
-    Edit your docs locally and preview them in real time.
+<CardGroup cols={2}>
+  <Card title="Quick Start" icon="rocket" href="/quickstart">
+    Add ShadowHook to your project and run your first hook in minutes.
   </Card>
-  <Card
-    title="Customize your site"
-    icon="palette"
-    href="/essentials/settings"
-  >
-    Customize the design and colors of your site to match your brand.
+  <Card title="Hook Modes" icon="code-branch" href="/concepts/hook-modes">
+    Understand shared, multi, and unique modes to choose the right strategy.
   </Card>
-    <Card
-    title="Set up navigation"
-    icon="map"
-    href="/essentials/navigation"
-  >
-    Organize your docs to help users find what they need and succeed with your product.
+  <Card title="API Reference" icon="code" href="/reference/api">
+    Full reference for all native C and Java APIs.
   </Card>
-  <Card
-    title="API documentation"
-    icon="terminal"
-    href="/api-reference/introduction"
-  >
-    Auto-generate API documentation from OpenAPI specifications.
+  <Card title="Known Issues" icon="triangle-exclamation" href="/help/known-issues">
+    Understand platform limitations before deploying to production.
   </Card>
-</Columns>
+</CardGroup>
 
-## Create beautiful pages
+## What you can do with ShadowHook
 
-Everything you need to create world-class documentation.
+<CardGroup cols={2}>
+  <Card title="Hook functions" icon="fish-fins" href="/guides/hook-unhook">
+    Replace any function with your own proxy, then call the original on your terms.
+  </Card>
+  <Card title="Intercept instructions" icon="microchip" href="/guides/intercept-unintercept">
+    Insert an interceptor at any instruction address — read and modify registers mid-execution.
+  </Card>
+  <Card title="Look up symbols" icon="magnifying-glass" href="/concepts/symbols">
+    Bypass linker namespace restrictions to resolve symbols from `.dynsym`, `.symtab`, and `.gnu_debugdata`.
+  </Card>
+  <Card title="Monitor ELF load/unload" icon="eye" href="/guides/linker-callbacks">
+    Register callbacks that fire before and after an ELF's `.init_array` or `.fini_array` executes.
+  </Card>
+</CardGroup>
 
-<Columns cols={2}>
-  <Card
-    title="Write with MDX"
-    icon="pen-fancy"
-    href="/essentials/markdown"
-  >
-    Use MDX to style your docs pages.
-  </Card>
-  <Card
-    title="Code samples"
-    icon="code"
-    href="/essentials/code"
-  >
-    Add sample code to demonstrate how to use your product.
-  </Card>
-  <Card
-    title="Images"
-    icon="image"
-    href="/essentials/images"
-  >
-    Display images and other media.
-  </Card>
-  <Card
-    title="Reusable snippets"
-    icon="recycle"
-    href="/essentials/reusable-snippets"
-  >
-    Write once and reuse across your docs.
-  </Card>
-</Columns>
+## Key features
 
-## Need inspiration?
+- **Stability** — battle-tested in ByteDance production apps at scale
+- **Compatibility** — API and ABI backward-compatible across releases; supports Android 4.1–16
+- **Three hook modes** — shared (chain + recursion-safe), multi (chain, no recursion guard), unique (exclusive)
+- **Pending hooks** — auto-completes hooks on ELFs that haven't been loaded yet
+- **Symbol resolution** — searches `.dynsym`, `.symtab`, and compressed `.gnu_debugdata` sections
+- **Operation recording** — exportable audit log of every hook and intercept operation
+- **CFI/FP unwind safe** — stack unwinding works correctly inside proxy and interceptor functions
 
-<Card
-  title="See complete examples"
-  icon="stars"
-  href="https://mintlify.com/customers"
->
-  Browse our showcase of exceptional documentation sites.
-</Card>
+<Note>
+  ShadowHook is an **inline hook** library. If you need a PLT hook library for Android, see [ByteHook](https://github.com/bytedance/bhook).
+</Note>

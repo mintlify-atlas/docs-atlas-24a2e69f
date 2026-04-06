@@ -1,0 +1,80 @@
+---
+title: "Error Codes"
+description: "Complete list of ShadowHook error codes and their meanings."
+---
+
+## Retrieving error information
+
+```c
+// Native — thread-local errno from the most recent ShadowHook API call
+int         shadowhook_get_errno(void);
+const char *shadowhook_to_errmsg(int error_number);
+```
+
+```java
+// Java
+public static String ShadowHook.toErrmsg(int errno);
+```
+
+When `shadowhook_init()` or `ShadowHook.init()` returns non-zero, the return value itself is the errno.
+
+For all other APIs that return `NULL` or `-1`, call `shadowhook_get_errno()` to retrieve the errno after the failure.
+
+<Note>
+  errno 1 (`SHADOWHOOK_ERRNO_PENDING`) is **not an error**. It means the target ELF has not been loaded yet. ShadowHook has recorded the hook or intercept task internally and will execute it automatically before linker calls `.init_array` when the ELF is loaded. Use the `_callback` API variants to receive a notification when the task completes.
+</Note>
+
+---
+
+## Error code table
+
+| Code | Constant | Description |
+|------|----------|-------------|
+| 0 | `SHADOWHOOK_ERRNO_OK` | Success. |
+| 1 | `SHADOWHOOK_ERRNO_PENDING` | Pending task. The target ELF is not yet loaded; the hook/intercept will execute automatically when it loads. |
+| 2 | `SHADOWHOOK_ERRNO_UNINIT` | ShadowHook has not been initialized. |
+| 3 | `SHADOWHOOK_ERRNO_INVALID_ARG` | Invalid argument passed to an API. |
+| 4 | `SHADOWHOOK_ERRNO_OOM` | Out of memory. |
+| 5 | `SHADOWHOOK_ERRNO_MPROT` | `mprotect()` failed. |
+| 6 | `SHADOWHOOK_ERRNO_WRITE_CRASH` | Writing instruction data to the target address caused a `SIGSEGV` or `SIGBUS` crash. |
+| 7 | `SHADOWHOOK_ERRNO_INIT_ERRNO` | errno module initialization failed. |
+| 8 | `SHADOWHOOK_ERRNO_INIT_SIGSEGV` | bytesig `SIGSEGV` protection mechanism initialization failed. |
+| 9 | `SHADOWHOOK_ERRNO_INIT_SIGBUS` | bytesig `SIGBUS` protection mechanism initialization failed. |
+| 10 | `SHADOWHOOK_ERRNO_INTERCEPT_DUP` | Duplicate intercept: an interceptor with the same `pre` and `data` already exists at the same target address. |
+| 11 | `SHADOWHOOK_ERRNO_INIT_SAFE` | safe module initialization failed. |
+| 12 | `SHADOWHOOK_ERRNO_INIT_LINKER` | linker module initialization failed. |
+| 13 | `SHADOWHOOK_ERRNO_INIT_HUB` | hub module initialization failed. |
+| 14 | `SHADOWHOOK_ERRNO_HUB_CREAT` | Failed to create a shared-mode hub at the hook target address. |
+| 15 | `SHADOWHOOK_ERRNO_MONITOR_DLOPEN` | Failed to monitor `dlopen()`. Only occurs on Android 4.x. |
+| 16 | `SHADOWHOOK_ERRNO_HOOK_UNIQUE_DUP` | Duplicate unique hook: a unique-mode proxy already exists at the same target address. |
+| 17 | `SHADOWHOOK_ERRNO_HOOK_DLOPEN_CRASH` | Searching for the target ELF by library name and symbol name caused a `SIGSEGV` or `SIGBUS`. Only occurs on Android 4.x. |
+| 18 | `SHADOWHOOK_ERRNO_HOOK_DLSYM` | Symbol not found in the target ELF when looking up by library name and symbol name. |
+| 19 | `SHADOWHOOK_ERRNO_HOOK_DLSYM_CRASH` | Symbol lookup caused a `SIGSEGV` or `SIGBUS`. |
+| 20 | `SHADOWHOOK_ERRNO_HOOK_DUP` | Duplicate shared hook: a proxy with the same address already exists in the shared-mode hub at the same target address. |
+| 21 | `SHADOWHOOK_ERRNO_HOOK_DLADDR_CRASH` | Getting symbol information via the target address caused a `SIGSEGV` or `SIGBUS`. Only occurs on Android 4.x. |
+| 22 | `SHADOWHOOK_ERRNO_HOOK_DLINFO` | Getting symbol information via the target address failed to find symbol information. |
+| 23 | `SHADOWHOOK_ERRNO_HOOK_SYMSZ` | Symbol size too small: the function at the target address does not have enough subsequent instructions to accommodate the hook. |
+| 24 | `SHADOWHOOK_ERRNO_HOOK_ENTER` | Failed to allocate the entry trampoline. |
+| 25 | `SHADOWHOOK_ERRNO_HOOK_REWRITE_CRASH` | Instruction rewriting caused a `SIGSEGV` or `SIGBUS`. |
+| 26 | `SHADOWHOOK_ERRNO_HOOK_REWRITE_FAILED` | Instruction rewriting failed. |
+| 27 | `SHADOWHOOK_ERRNO_UNHOOK_NOTFOUND` | Unhook/unintercept: the proxy function or interceptor was not found. |
+| 28 | `SHADOWHOOK_ERRNO_UNHOOK_CMP_CRASH` | Unhook/unintercept: verifying the original instructions before restoring them caused a `SIGSEGV` or `SIGBUS`. |
+| 29 | `SHADOWHOOK_ERRNO_UNHOOK_TRAMPO_MISMATCH` | Unhook/unintercept: the covered instructions have been modified again since the hook was applied; verification failed. |
+| 30 | `SHADOWHOOK_ERRNO_UNHOOK_EXIT_MISMATCH` | Deprecated. |
+| 31 | `SHADOWHOOK_ERRNO_UNHOOK_EXIT_CRASH` | Deprecated. |
+| 32 | `SHADOWHOOK_ERRNO_UNHOOK_ON_ERROR` | Unhook/unintercept: the corresponding task is in an error state (a pending task that later encountered an error). Resources are released, but the actual unhook was not performed. |
+| 33 | `SHADOWHOOK_ERRNO_UNHOOK_ON_UNFINISHED` | Unhook/unintercept: the corresponding task is still in a pending/unfinished state. Resources are released, but the actual unhook was not performed. |
+| 34 | `SHADOWHOOK_ERRNO_ELF_ARCH_MISMATCH` | The target ELF uses an unsupported instruction set (e.g., x86 or Houdini environment). |
+| 35 | `SHADOWHOOK_ERRNO_LINKER_ARCH_MISMATCH` | The linker uses an unsupported instruction set. Occurs on x86 or in a Houdini environment. |
+| 36 | `SHADOWHOOK_ERRNO_DUP` | Duplicate `dl_init`/`dl_fini` callback registration: all three of `pre`, `post`, and `data` are identical to an existing registration. |
+| 37 | `SHADOWHOOK_ERRNO_NOT_FOUND` | Unregister `dl_init`/`dl_fini` callback: the specified callback was not found. |
+| 38 | `SHADOWHOOK_ERRNO_NOT_SUPPORT` | Feature not supported. Currently only returned when registering linker callbacks on Android < 5.0. |
+| 39 | `SHADOWHOOK_ERRNO_INIT_TASK` | task module initialization failed. |
+| 40 | `SHADOWHOOK_ERRNO_HOOK_ISLAND_EXIT` | Failed to allocate island memory for the exit trampoline. |
+| 41 | `SHADOWHOOK_ERRNO_HOOK_ISLAND_ENTER` | Failed to allocate island memory for the entry trampoline. |
+| 42 | `SHADOWHOOK_ERRNO_HOOK_ISLAND_REWRITE` | Failed to allocate island memory for instruction rewriting. |
+| 43 | `SHADOWHOOK_ERRNO_MODE_CONFLICT` | Mode conflict: a unique-mode hook conflicts with an existing shared- or multi-mode hook at the same address, or vice versa. |
+| 44 | `SHADOWHOOK_ERRNO_HOOK_MULTI_DUP` | Duplicate multi hook: a proxy with the same address already exists in the multi-mode proxy chain at the same target address. |
+| 45 | `SHADOWHOOK_ERRNO_DISABLED` | ShadowHook has been globally disabled; the operation was not performed. |
+| 100 | _(Java layer)_ | `System.loadLibrary("shadowhook")` failed with a JVM exception. |
+| 101 | _(Java layer)_ | The `nativeInit()` JNI call threw a JVM exception during native initialization. |

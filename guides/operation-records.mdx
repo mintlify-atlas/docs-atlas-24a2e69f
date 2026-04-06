@@ -1,0 +1,152 @@
+---
+title: "Operation Records"
+description: "Export a timestamped audit log of every hook and intercept operation."
+---
+
+shadowhook can record every hook, unhook, intercept, and unintercept operation in an internal buffer. You can retrieve these records at any time — for example, to attach them to a crash report.
+
+## Enabling recording
+
+Recording is disabled by default. Enable it during initialization or at any time afterward.
+
+<Tabs>
+  <Tab title="Java">
+    ```java
+    // During initialization
+    ShadowHook.init(new ShadowHook.ConfigBuilder()
+        .setRecordable(true)
+        .build());
+
+    // Or after initialization
+    ShadowHook.setRecordable(true);
+    ```
+  </Tab>
+  <Tab title="Native (C)">
+    ```c
+    // After initialization — shadowhook_init() does not accept a recordable parameter,
+    // so set it separately after init
+    shadowhook_set_recordable(true);
+    ```
+  </Tab>
+</Tabs>
+
+## Retrieving records
+
+### Java API
+
+```java
+public static String getRecords(RecordItem... recordItems)
+
+public enum RecordItem {
+    TIMESTAMP,
+    CALLER_LIB_NAME,
+    OP,
+    LIB_NAME,
+    SYM_NAME,
+    SYM_ADDR,
+    NEW_ADDR,
+    BACKUP_LEN,
+    ERRNO,
+    STUB,
+    FLAGS
+}
+```
+
+Pass one or more `RecordItem` values to select which fields to include. Passing no arguments returns all fields.
+
+```java
+// All fields
+String all = ShadowHook.getRecords();
+
+// Selected fields only
+String selected = ShadowHook.getRecords(
+    ShadowHook.RecordItem.TIMESTAMP,
+    ShadowHook.RecordItem.OP,
+    ShadowHook.RecordItem.SYM_NAME,
+    ShadowHook.RecordItem.ERRNO);
+```
+
+### Native API
+
+```c
+// Returns a malloc'd buffer — caller must free()
+char *shadowhook_get_records(uint32_t item_flags);
+
+// Writes directly to a file descriptor — async-signal-safe
+void shadowhook_dump_records(int fd, uint32_t item_flags);
+```
+
+`item_flags` is a bitmask. Use `|` to combine flags.
+
+```c
+// Item flag constants
+#define SHADOWHOOK_RECORD_ITEM_ALL             0x7FF  // all fields
+#define SHADOWHOOK_RECORD_ITEM_TIMESTAMP       (1 << 0)
+#define SHADOWHOOK_RECORD_ITEM_CALLER_LIB_NAME (1 << 1)
+#define SHADOWHOOK_RECORD_ITEM_OP              (1 << 2)
+#define SHADOWHOOK_RECORD_ITEM_LIB_NAME        (1 << 3)
+#define SHADOWHOOK_RECORD_ITEM_SYM_NAME        (1 << 4)
+#define SHADOWHOOK_RECORD_ITEM_SYM_ADDR        (1 << 5)
+#define SHADOWHOOK_RECORD_ITEM_NEW_ADDR        (1 << 6)
+#define SHADOWHOOK_RECORD_ITEM_BACKUP_LEN      (1 << 7)
+#define SHADOWHOOK_RECORD_ITEM_ERRNO           (1 << 8)
+#define SHADOWHOOK_RECORD_ITEM_STUB            (1 << 9)
+#define SHADOWHOOK_RECORD_ITEM_FLAGS           (1 << 10)
+```
+
+```c
+// Get all records as a string
+char *records = shadowhook_get_records(SHADOWHOOK_RECORD_ITEM_ALL);
+if (records != NULL) {
+    LOG("%s", records);
+    free(records);  // caller must free
+}
+
+// Write selected fields to a file
+int fd = open("/data/local/tmp/shadowhook_records.txt", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+shadowhook_dump_records(fd,
+    SHADOWHOOK_RECORD_ITEM_TIMESTAMP |
+    SHADOWHOOK_RECORD_ITEM_OP        |
+    SHADOWHOOK_RECORD_ITEM_SYM_NAME  |
+    SHADOWHOOK_RECORD_ITEM_ERRNO);
+close(fd);
+```
+
+<Tip>
+  `shadowhook_dump_records()` is async-signal-safe and can be called directly
+  from a signal handler. Use it to capture operation records during a native
+  crash: open a file descriptor before the crash, then call
+  `shadowhook_dump_records()` inside your `SIGSEGV` / `SIGABRT` handler.
+</Tip>
+
+## Record format
+
+Records are plain ASCII. Each record occupies one line; lines are separated by `\n`. Fields within a line are separated by `,`, in this fixed order:
+
+| # | Field | Description | Notes |
+|---|-------|-------------|-------|
+| 1 | `TIMESTAMP` | Operation timestamp | Format: `YYYY-MM-DDThh:mm:ss.sss+hh:mm` |
+| 2 | `CALLER_LIB_NAME` | Basename of the calling library | — |
+| 3 | `OP` | Operation type | See table below |
+| 4 | `LIB_NAME` | Basename of the target function's library | Omitted for `unhook` and `unintercept`. May be `unknown` for addr-based operations. |
+| 5 | `SYM_NAME` | Target function or symbol name | Omitted for `unhook` and `unintercept`. May be `unknown` for addr-based operations. |
+| 6 | `SYM_ADDR` | Address of the target instruction or function | Omitted for `unhook` and `unintercept` |
+| 7 | `NEW_ADDR` | Address of the proxy or interceptor function | Omitted for `unhook` and `unintercept` |
+| 8 | `BACKUP_LEN` | Bytes overwritten at the target address (unit: bytes) | Omitted for `unhook` and `unintercept` |
+| 9 | `ERRNO` | Error code (`0` = success) | — |
+| 10 | `STUB` | Stub pointer returned by the hook/intercept | Pairs a hook record with its corresponding unhook record |
+| 11 | `FLAGS` | `flags` value passed to the API | Omitted for `unhook` and `unintercept` |
+
+### OP values
+
+| OP value | Corresponding API |
+|----------|------------------|
+| `hook_func_addr` | `shadowhook_hook_func_addr` / `_2` |
+| `hook_sym_addr` | `shadowhook_hook_sym_addr` / `_2` |
+| `hook_sym_name` | `shadowhook_hook_sym_name` / `_2` / `_callback` / `_callback_2` |
+| `unhook` | `shadowhook_unhook` |
+| `intercept_instr_addr` | `shadowhook_intercept_instr_addr` |
+| `intercept_func_addr` | `shadowhook_intercept_func_addr` |
+| `intercept_sym_addr` | `shadowhook_intercept_sym_addr` |
+| `intercept_sym_name` | `shadowhook_intercept_sym_name` / `_callback` |
+| `unintercept` | `shadowhook_unintercept` |
